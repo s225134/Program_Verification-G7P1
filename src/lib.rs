@@ -29,10 +29,9 @@ impl slang_ui::Hook for App {
             // Get method's body
             let cmd = &m.body.clone().unwrap().cmd;
             // Encode it in IVL
-            let ivl = cmd_to_ivlcmd(cmd)?;
-            // Calculate obligation and error message (if obligation is not
-            // verified)
-            let (oblig, msg) = wp(&ivl, &Expr::bool(true))?;
+            let ivl = cmd_to_ivlcmd(cmd);
+            // Calculate obligation and error message (if obligation is not verified)
+            let (oblig, msg) = wp(&ivl, &Expr::bool(true));
             // Convert obligation to SMT expression
             let soblig = oblig.smt()?;
 
@@ -47,10 +46,10 @@ impl slang_ui::Hook for App {
                     // If the obligations result not valid, report the error (on
                     // the span in which the error happens)
                     smtlib::SatResult::Sat => {
-                        cx.error(oblig.span, format!("{msg}"));
+                        cx.error(oblig.span, msg.to_string());
                     }
                     smtlib::SatResult::Unknown => {
-                        cx.warning(oblig.span, "{msg}: unknown sat result");
+                        cx.warning(oblig.span, format!("{msg}: unknown sat result"));
                     }
                     smtlib::SatResult::Unsat => (),
                 }
@@ -64,18 +63,18 @@ impl slang_ui::Hook for App {
 
 // Encoding of (assert-only) statements into IVL (for programs comprised of only
 // a single assertion)
-fn cmd_to_ivlcmd(cmd: &Cmd) -> Result<IVLCmd> {
+fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
     match &cmd.kind {
-        CmdKind::Assert { condition, .. } => Ok(IVLCmd::assert(condition, "Assert might fail!")),
+        CmdKind::Assert { condition, .. } => IVLCmd::assert(condition, "Assert might fail!"),
         _ => todo!("Not supported (yet)."),
     }
 }
 
 // Weakest precondition of (assert-only) IVL programs comprised of a single
 // assertion
-fn wp(ivl: &IVLCmd, _: &Expr) -> Result<(Expr, String)> {
+fn wp(ivl: &IVLCmd, post: &Expr) -> (Expr, String) {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => Ok((condition.clone(), message.clone())),
+        IVLCmdKind::Assert { condition, message } => (condition.clone(), message.clone()),
         _ => todo!("Not supported (yet)."),
     }
 }
