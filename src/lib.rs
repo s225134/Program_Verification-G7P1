@@ -8,7 +8,7 @@ use slang_ui::prelude::*;
 pub struct App;
 
 impl slang_ui::Hook for App {
-    fn analyze(&self, cx: &mut slang_ui::Context, file: &slang::SourceFile) -> Result<()> {
+    fn analyze(&self, cx: &slang_ui::Context, file: &slang::SourceFile) -> Result<()> {
         // Get reference to Z3 solver
         let mut solver = cx.solver()?;
 
@@ -22,7 +22,7 @@ impl slang_ui::Hook for App {
                 .reduce(|a, b| a & b)
                 .unwrap_or(Expr::bool(true));
             // Convert the expression into an SMT expression
-            let spre = pre.smt()?;
+            let spre = pre.smt(cx.smt_st())?;
             // Assert precondition
             solver.assert(spre.as_bool()?)?;
 
@@ -33,7 +33,7 @@ impl slang_ui::Hook for App {
             // Calculate obligation and error message (if obligation is not verified)
             let (oblig, msg) = wp(&ivl, &Expr::bool(true));
             // Convert obligation to SMT expression
-            let soblig = oblig.smt()?;
+            let soblig = oblig.smt(cx.smt_st())?;
 
             // Run the following solver-related statements in a closed scope.
             // That is, after exiting the scope, all assertions are forgotten
