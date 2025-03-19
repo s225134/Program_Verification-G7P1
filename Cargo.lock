@@ -1566,7 +1566,7 @@ dependencies = [
 [[package]]
 name = "slang"
 version = "0.1.0"
-source = "git+https://github.com/oembo-sse/slang#db6d926f06562d45944463a0d1feadb94d96a258"
+source = "git+https://github.com/oembo-sse/slang#54562679417d0b8245e49d259f26e3910f3a885b"
 dependencies = [
  "indexmap",
  "itertools 0.13.0",
@@ -1595,7 +1595,7 @@ dependencies = [
 [[package]]
 name = "slang-ui"
 version = "0.1.0"
-source = "git+https://github.com/oembo-sse/slang#db6d926f06562d45944463a0d1feadb94d96a258"
+source = "git+https://github.com/oembo-sse/slang#54562679417d0b8245e49d259f26e3910f3a885b"
 dependencies = [
  "axum",
  "axum-extra",
@@ -1629,8 +1629,9 @@ checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
 
 [[package]]
 name = "smtlib"
-version = "0.2.0"
-source = "git+https://github.com/oeb25/smtlib-rs?branch=arena-alloc#609e0df52a7b4e08cf9b309b0eef994a835a878e"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "516ce9fd6e1ac140108629c5039128abd5b3f116ed75861bd1fbbdc20c0d37bf"
 dependencies = [
  "indexmap",
  "itertools 0.12.1",
@@ -1641,8 +1642,9 @@ dependencies = [
 
 [[package]]
 name = "smtlib-lowlevel"
-version = "0.2.0"
-source = "git+https://github.com/oeb25/smtlib-rs?branch=arena-alloc#609e0df52a7b4e08cf9b309b0eef994a835a878e"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e48ee399efb51e84d25d4ac02b7e61141f47781d84d8bfc934b8791b30f6c52"
 dependencies = [
  "bumpalo",
  "itertools 0.12.1",
