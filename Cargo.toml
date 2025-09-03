@@ -4,11 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-datatest-stable = "0.2.9"
-itertools = "0.13.0"
-regex = "1.10.6"
+datatest-stable = "0.3.2"
+itertools = "0.14.0"
+regex = "1.11.2"
 slang-ui = { git = "https://github.com/oembo-sse/slang" }
-tokio = { version = "1.40.0", features = ["full"] }
+tokio = { version = "1.47.1", features = ["full"] }
 
 [[test]]
 name = "tests"
