@@ -1,38 +1,29 @@
-The goal of this project is to develop an automated verification tool for *slang*, a language similar to the languages explored throughout the first half of the course and to a fragment of Viper.
+The goal of this project is to develop an automated verification tool for *slang*, a language similar to a fragment of Viper and the languages explored throughout the first half of the course.
 
 We start by discussing the project *Guidelines*, before going over an overview of the *slang* language. We then present the individual tasks (referred to as *Features*), and finish with a short introduction of a useful *library* that you may use in your project. 
 
 # Guidelines
-We split the task of developing a *slang* verifier into _core features_ and _extension features_. Generally speaking, your solution should support *all* core features and *some* extension features.
-Together with the implementation of your verifier you must submit a [report (link to template)](https://pv24.cmath.eu/downloads/report.zip) in which you document the implemented features. 
+We split the task of developing a slang verifier into core features and extension features. Generally speaking, your solution should support all core features and some extension features.
 
 We provide a number of stars for each feature to indicate a rough estimate of the required effort and difficulty.
 
-- In total, there are 27 stars. 
-- We expect all groups to work on the three core features, which are worth 6 stars.
-- Groups aiming for the grade
-    - 7 should aim to gain at least 10 stars;
-    - 10 should aim to gain at least 15 stars;
-    - 12 should aim to gain more than 20 stars.
+In total, there are 27 stars. We expect you to work on the three core features, which are worth 6 stars.
+To obtain a grade of (Danish/German grading scale)
+- 12/1.0, you should aim for at least 20 stars;
+- 10/2.0, you should aim for at least 15 stars;
+- 4-7/3.0, you should aim for at least 10 stars;
+- 2/4.0, you should aim for at least 6 stars.
 
 To gain all stars for a feature, it must be fully supported in the following sense:
-
 - The feature has been implemented in your verifier.
-- Your report briefly justifies the reasoning principles applied for verifying the feature, for example by providing operational semantics, Hoare-style inference rules, and an explanation of why your implemented verification approach is sound.
-- Your implementation works as expected on the provided examples.
-- Your implementation works as expected on least two additional (and ideally non-trivial) examples of your choice (one that should verify and one that should not verify).
+- Your implementation works as expected on least two (non-trivial) examples of your choice (one that should verify and one that should not verify unless stated otherwise).
 
-Solutions that satisfy some of the above criteria, but not all of them, will be awarded a reduced number of stars.
+We encourage you to reasonably document what you are doing in your implementation. You do not have to write a report of any kind. Please also notice that parts of the weekly assignments cover the foundations underlying the design of your verifier. You should those work on those assignments first and consult your solutions before you starting to implement a feature.
 
-Generally speaking, your solution must be sound but not necessarily complete. However, you should aim to be as complete as possible.
+Solutions that satisfy some of the above criteria, but not all of them, will be awarded a reduced number of stars. Generally speaking, your solution must be sound but not necessarily complete. However, you should aim to be as complete as possible.
 
-## Submission
+You are not allowed to share code with other groups. However, you may share examples for testing your verifier with others.
 
-You must submit the project as a single `.zip` file including your source code and report via the corresponding assignment on DTU Learn.
-
-**The submission deadline is 01/11/2024.**
-
-If your verification tool is not used in exactly the same way as suggested by the provided library, you must also include a README explaining how to run your tool.
 
 # slang
 The *slang* language supports similar programming features to the ones seen in the course, but not always identical ones. *slang* features global variables, methods, functions, domains, multi-branch loops (`loop` and `for`), and conditionals (`match`). Moreover, it supports verification oriented commands and annotations such as `assume`, `assert`, `requires`, `ensures`, `invariant`, `decreases` and `modifies`. *slang* also features goto-like commands such as `break`, `continue` and `return`. 
@@ -126,11 +117,13 @@ method fib_iter(n: Int): Int
 ```
 
 ### *slang* grammar
-*slang* programs are given by the grammar below. The grammar uses extended syntax inspired by regular expressions: `A*` denotes zero or more repetitions of `A`; `A?` denotes that `A` is optional, that is, zero or one appearances of `A`.
+*slang* programs are given by the grammar below. The grammar uses extended syntax inspired by regular expressions: `A*` denotes zero or more repetitions of `A`; `A?` denotes that `A` is optional, that is, zero or one appearances of `A`.
 
-An identifier `Ident` is any non-empty string that
+You can find the precise grammar used in our implementation [here](https://github.com/oembo-sse/slang/blob/6f979d504a9d40b49fab352978d001ce7bf172e5/crates/slang/src/parse/grammar.lalrpop).
+
+An identifier `Ident` is any non-empty string that
 1. is not a keyword used in the grammar and
-2. starts with a letter or `_` followed by arbitrary many letters, `_` or digits, that is, it is matched by the regular expression `[a-zA-Z_][a-zA-Z_0-9]*`.
+2. starts with a letter or `_` followed by arbitrary many letters, `_` or digits, that is, it is matched by the regular expression `[a-zA-Z_][a-zA-Z_0-9]*`.
 
 In the following grammar for slang, a program is called a `File`.
 ```
@@ -202,13 +195,14 @@ Decreases ::= "decreases" Expr
 Stmt ::=
     | "var" Ident ":" Type (":=" Expr)?
     | Ident ":=" Expr
-    | "break" | "continue" | "return"
+    | "break" | "continue" 
+    | "return" Expr
     | "assume" Expr | "assert" Expr
     | Stmt ";" Stmt
     | (Ident ":=" )? Ident "(" Exprs ")"
     | "match" "{" Cases "}"
     | "loop" Invariant* Decreases? "{" Cases "}"
-    | "for" Ident "in" Expr ".." Expr "{" Stmt "}"
+    | "for" Ident "in" Expr ".." Expr Invariant* Decreases? "{" Stmt "}"
 
 Cases := Case | Case "," Cases
 Case := Expr "=>" Stmt
@@ -218,14 +212,14 @@ Invariant ::= "invariant" Expr
 
 We impose a few additional rules to ensure that *slang* programs are well-formed. A selection of those rules is listed below. These rules are already checked by the provided project library.
 
-* We only admit well-typed expressions in *slang* programs. For example, if `x` and `y` are of type `Int`, then `17 / x + 3 * y` is well-typed, whereas `x ==> y + 3` is not.
-* Every expression of type `Bool` is a logical formula. If the expression does not contain any quantifiers (`exists` or `forall`), it is a Boolean expression. Logical formulas may only appear in `assert` or `assume` commands as well as in the annotations `requires`, `ensures`, and `invariant`. Boolean expressions can also appear in assignments and as guards of conditionals and loops.
+* We only admit well-typed expressions in *slang* programs. For example, if `x` and `y` are of type `Int`, then `17 / x + 3 * y` is well-typed, whereas `x ==> y + 3` is not.
+* Every expression of type `Bool` is a logical formula. If the expression does not contain any quantifiers (`exists` or `forall`), it is a Boolean expression. Logical formulas may only appear in `assert` or `assume` commands as well as in the annotations `requires`, `ensures`, and `invariant`. Boolean expressions can also appear in assignments and as guards of conditionals and loops.
 * The commands `break` and `continue` may only appear inside of a loop.
 * The `result` expression may only appear in `ensures` specifications.
 * Methods allow `requires`, `ensures`, `modifies`, and `decreases` specifications; user-defined functions only allow `requires` and `ensures` specifications.
 * Function calls *are expressions* and can appear in expressions.
 * Method calls *are commands* and cannot appear in expressions. If the return value of a method call is to be used, then a method call must assign its output to a variable.
-* A method’s input parameters (first list `Vars` in the grammar) are read-only.
+* A method’s input parameters (first list `Vars` in the grammar) are read-only.
  
 # Features
 
@@ -318,6 +312,8 @@ If a program cannot be verified, your verification tool should correctly point t
 
 *Hint:* Use the infrastructure for reporting errors of the provided library.
 
+*Remark:* For this feature, you do not have to provide examples that verify. Instead, provide examples that illustrate the different kinds of errors that your implementation can report. 
+
 **Example:**
 ```
 method sumn(n: Int): Int
@@ -369,6 +365,7 @@ method sumn(n: Int): Int
     }
 }
 ```
+
 ## Extension Feature 3: efficient assignments (★)
 
 Implement efficient verification of assignments by transforming commands into dynamic single assignment form (DSA) before computing weakest preconditions. That is, finish with a subset of `IVL0` comprised only of `Assert`, `Assume`, `Seq` and `NonDet`.
@@ -582,11 +579,16 @@ method client(): Int
 }
 ```
 
-# Rust library and template
-We provide a [Rust](https://doc.rust-lang.org/book/) [library](https://github.com/oembo-sse/slang) for your project which takes care of parsing, type-checking, error reporting and of providing a web interface for your verification infrastructure. [Here](https://github.com/oembo-sse/slang-template) you can find a template for using this library that allows verification of programs comprised of a single assertion.
+## Extension Feature 12?
+
+Feel free to suggest additional extension features. However, approach us first to check if your suggestion merits additional stars.
+
+# Rust Template
+We provide a [Rust](https://doc.rust-lang.org/book/) [library](https://github.com/oembo-sse/slang) for your project which takes care of parsing, type-checking, error reporting and of providing a web interface for your verification infrastructure. 
+This repository contains a [template](https://github.com/oembo-sse/slang-template) for using this library. The template already supports verification of programs comprised of a single assertion.
 
 You are free to implement the project in a programming language of your choice.
-However, if you do not want to use the provided library, you have to implement the corresponding support structure yourself. The implementation effort for such infrastructure (e.g. a parser) does not contribute to your final grade.
+However, if you do not use the provided library, you have to implement the corresponding support structure yourself. The implementation effort for such infrastructure (e.g. a parser) does not contribute to your final grade.
 
 In your project, you will mainly interface with two main components of the crate: [`ast`](https://oembo-sse.github.io/slang/slang/ast/index.html) and [`Context`](https://oembo-sse.github.io/slang/slang_ui/struct.Context.html).
 * The `ast` module provides access to the abstract syntax tree of the *slang* language and to utilities that you can use to create commands, terms, formulae, etc. Notice that the library refers to both terms and formulae as [expressions](https://oembo-sse.github.io/slang/slang/ast/struct.Expr.html). Moreover, we already provide a function for converting expressions to their SMT counterpart (e.g. for [expressions](https://oembo-sse.github.io/slang/slang/ast/struct.Expr.html#method.smt)) such that they can be supplied to the [SMT solver API](https://oembo-sse.github.io/slang/smtlib/struct.Solver.html).
@@ -599,8 +601,13 @@ An implementation of the project will mostly work as follows:
 1. In a series of steps, transform the `AST` of the program into simpler programs in `IVL`;
 2. Transform the `IVL` programs into [expressions](https://oembo-sse.github.io/slang/slang/ast/struct.Expr.html) that can be verified with an [SMT solver](https://oembo-sse.github.io/slang/smtlib/struct.Solver.html); and
 3. [report errors](https://oembo-sse.github.io/slang/slang_ui/struct.Context.html) to the user, making sure that the *location* and *message* of the error are fitting.
-   
-To start the template, you can execute `cargo run` (and then open [`http://localhost:3000/`](http://localhost:3000) in your web browser). The tool will run until you close it with CTRL + C.
+
+## Getting Started
+
+First, make sure that you have [Rust](https://doc.rust-lang.org/book/) and `z3` installed on your machine and available in your `PATH`. 
+
+After that, you can use the template in the `project1` folder of your project repository.
+To start your verification tool, execute `cargo run` (and then open [`http://localhost:3000/`](http://localhost:3000) in your web browser). The tool will run until you close it with CTRL + C.
 
 To run all tests in the `tests` folder, you can run `cargo test`. 
 We strongly recommend that you add your own tests for each feature.
@@ -622,3 +629,6 @@ method client() {
     assert 1 + 2 == 4
 }
 ```
+
+Notice that `// @CheckError` only works correctly if you have properly implemented error reporting.
+If you do not plan to do so, please use a different comment to indicate where you expect an error to happen.
