@@ -66,6 +66,17 @@ impl slang_ui::Hook for App {
 fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => IVLCmd::assert(condition, "Assert might fail!"),
+        CmdKind::Assume { condition } => IVLCmd::assume(condition),
+        CmdKind::Seq( c1, c2, ) => IVLCmd::seq(&cmd_to_ivlcmd(c1), &cmd_to_ivlcmd(c2)),
+        CmdKind::Match { body } => {
+            let cases : Vec<IVLCmd> = body
+                .cases
+                .iter()
+                .map(|case| IVLCmd::seq(&IVLCmd::assume(&case.condition), &cmd_to_ivlcmd(&case.cmd)))
+                .collect();
+            IVLCmd::nondets(&cases)
+        },
+        // CmdKind::VarDefinition { name, ty, expr } => 
         _ => todo!("Not supported (yet)."),
     }
 }
@@ -74,7 +85,18 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
 // assertion
 fn wp(ivl: &IVLCmd, post: &Expr) -> (Expr, String) {
     match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => (condition.clone(), message.clone()),
+        IVLCmdKind::Assert { condition, message } => (condition.clone().and(post), message.clone()),
+        IVLCmdKind::Assume { condition } => (condition.clone().imp(post), String::from("assume")),
+        IVLCmdKind::Seq( c1, c2) => { 
+            let (e, m) = wp(c2, post);
+            let (e1,m1) = wp(c1,&e);
+            (e1,m1)
+        },
+        IVLCmdKind::NonDet( c1, c2) => {
+            let (e1,m1) = wp(c1, post);
+            let (e2,m2) = wp(c2, post);
+            (e1.and(&e2), m2)
+        }
         _ => todo!("Not supported (yet)."),
     }
 }
