@@ -77,7 +77,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             IVLCmd::nondets(&cases)
         },
         // CmdKind::VarDefinition { name, ty, expr } => 
-        _ => todo!("Not supported (yet)."),
+        other => todo!("cmd: Not supported (yet): {other:?}"),
     }
 }
 
@@ -97,6 +97,6 @@ fn wp(ivl: &IVLCmd, post: &Expr) -> (Expr, String) {
             let (e2,m2) = wp(c2, post);
             (e1.and(&e2), m2)
         }
-        _ => todo!("Not supported (yet)."),
+        other => todo!("wp: Not supported (yet): {other:?}"),
     }
 }
