@@ -2,101 +2,246 @@ pub mod ivl;
 mod ivl_ext;
 
 use ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr};
+use slang::ast::{Cmd, CmdKind, Expr, Name};
+use slang::Span;
 use slang_ui::prelude::*;
+
+/// A single verification obligation:
+/// - `formula`: the condition that must be valid (under method `requires`)
+/// - `span`: where to blame if this condition is not provable
+/// - `message`: short human message
+#[derive(Debug, Clone)]
+struct Obligation {
+    formula: Expr,
+    span: Span,
+    message: String,
+}
 
 pub struct App;
 
 impl slang_ui::Hook for App {
     fn analyze(&self, cx: &slang_ui::Context, file: &slang::SourceFile) -> Result<()> {
-        // Get reference to Z3 solver
         let mut solver = cx.solver()?;
 
-        // Iterate methods
         for m in file.methods() {
-            // Get method's preconditions;
-            let pres = m.requires();
-            // Merge them into a single condition
-            let pre = pres
+            // 1) Merge method requires into a single Expr
+            let requires = m
+                .requires()
                 .cloned()
                 .reduce(|a, b| a & b)
                 .unwrap_or(Expr::bool(true));
-            // Convert the expression into an SMT expression
-            let spre = pre.smt(cx.smt_st())?;
-            // Assert precondition
-            solver.assert(spre.as_bool()?)?;
 
-            // Get method's body
-            let cmd = &m.body.clone().unwrap().cmd;
-            // Encode it in IVL
-            let ivl = cmd_to_ivlcmd(cmd);
-            // Calculate obligation and error message (if obligation is not verified)
-            let (oblig, msg) = wp(&ivl, &Expr::bool(true));
-            // Convert obligation to SMT expression
-            let soblig = oblig.smt(cx.smt_st())?;
+            // 2) If no body, nothing to verify
+            let Some(body) = m.body.clone() else { continue; };
+            let cmd = &body.cmd;
 
-            // Run the following solver-related statements in a closed scope.
-            // That is, after exiting the scope, all assertions are forgotten
-            // from subsequent executions of the solver
-            solver.scope(|solver| {
-                // Check validity of obligation
-                solver.assert(!soblig.as_bool()?)?;
-                // Run SMT solver on all current assertions
-                match solver.check_sat()? {
-                    // If the obligations result not valid, report the error (on
-                    // the span in which the error happens)
-                    smtlib::SatResult::Sat => {
-                        cx.error(oblig.span, msg.to_string());
+            // 3) Lower slang Cmd -> IVL, preserving spans
+            let ivl_root = cmd_to_ivlcmd(cmd);
+
+            // 4) Initial goal set X0 (safety only for now: post = true)
+            //    When you hook 'ensures' + 'return', change this to Ens[result := return_expr].
+            let init_goal = Obligation {
+                formula: Expr::bool(true),
+                span: ivl_root.span,
+                message: "postcondition".to_owned(),
+            };
+            let goals0 = vec![init_goal];
+
+            // 5) Notes-style SWP: (Cmd, X) -> X'
+            let obligations = swp(&ivl_root, goals0);
+
+            // 6) Check each obligation independently under 'requires'
+            for obl in obligations {
+                // Translate to SMT outside the closure so '?' uses outer Result type
+                let sreq = requires.smt(cx.smt_st())?;
+                let sobl = obl.formula.smt(cx.smt_st())?;
+
+                solver.scope(|solver| -> Result<(), smtlib::Error> {
+                    solver.assert(sreq.as_bool()?)?;
+                    solver.assert(!sobl.as_bool()?)?;
+
+                    match solver.check_sat()? {
+                        smtlib::SatResult::Sat => {
+                            cx.error(obl.span, obl.message.clone());
+                        }
+                        smtlib::SatResult::Unknown => {
+                            cx.warning(
+                                obl.span,
+                                format!("{}: solver returned unknown", obl.message),
+                            );
+                        }
+                        smtlib::SatResult::Unsat => { /* ok */ }
                     }
-                    smtlib::SatResult::Unknown => {
-                        cx.warning(oblig.span, format!("{msg}: unknown sat result"));
-                    }
-                    smtlib::SatResult::Unsat => (),
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                })?;
+            }
         }
 
         Ok(())
     }
 }
 
-// Encoding of (assert-only) statements into IVL (for programs comprised of only
-// a single assertion)
+/// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
+/// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
 fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
     match &cmd.kind {
-        CmdKind::Assert { condition, .. } => IVLCmd::assert(condition, "Assert might fail!"),
-        CmdKind::Assume { condition } => IVLCmd::assume(condition),
-        CmdKind::Seq( c1, c2, ) => IVLCmd::seq(&cmd_to_ivlcmd(c1), &cmd_to_ivlcmd(c2)),
-        CmdKind::Match { body } => {
-            let cases : Vec<IVLCmd> = body
-                .cases
-                .iter()
-                .map(|case| IVLCmd::seq(&IVLCmd::assume(&case.condition), &cmd_to_ivlcmd(&case.cmd)))
-                .collect();
-            IVLCmd::nondets(&cases)
+        CmdKind::Assert { condition, .. } => IVLCmd {
+            span: cmd.span,
+            kind: IVLCmdKind::Assert {
+                condition: condition.clone(),
+                message: "assertion might fail".to_owned(),
+            },
         },
-        // CmdKind::VarDefinition { name, ty, expr } => 
-        other => todo!("cmd: Not supported (yet): {other:?}"),
+
+        CmdKind::Assume { condition } => IVLCmd {
+            span: cmd.span,
+            kind: IVLCmdKind::Assume {
+                condition: condition.clone(),
+            },
+        },
+
+        CmdKind::Seq(c1, c2) => {
+            let left = cmd_to_ivlcmd(c1);
+            let right = cmd_to_ivlcmd(c2);
+            IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Seq(Box::new(left), Box::new(right)),
+            }
+        }
+
+        // Encode 'match' as a nondet over guarded branches: assume g; branch_cmd
+        // (Sound but possibly over-strict vs ordered semantics; refine later if needed.)
+        CmdKind::Match { body } => {
+            let mut cases_ivl: Vec<IVLCmd> = Vec::new();
+            for case in &body.cases {
+                let assume_g = IVLCmd {
+                    span: case.condition.span,
+                    kind: IVLCmdKind::Assume {
+                        condition: case.condition.clone(),
+                    },
+                };
+                let branch_cmd = cmd_to_ivlcmd(&case.cmd);
+                let seq_case = IVLCmd {
+                    span: case.cmd.span,
+                    kind: IVLCmdKind::Seq(Box::new(assume_g), Box::new(branch_cmd)),
+                };
+                cases_ivl.push(seq_case);
+            }
+            // Fold cases into a binary NonDet tree
+            let mut it = cases_ivl.into_iter();
+            let first = it.next().unwrap_or(IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Assume {
+                    condition: Expr::bool(false),
+                },
+            });
+            it.fold(first, |acc, nxt| IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::NonDet(Box::new(acc), Box::new(nxt)),
+            })
+        }
+
+        // var x: T := e  ==> Assignment
+        // var x: T       ==> Havoc x:T  (arbitrary value)
+        CmdKind::VarDefinition { name, ty, expr } => match expr {
+            Some(init_expr) => IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Assignment {
+                    name: name.clone(),
+                    expr: init_expr.clone(),
+                },
+            },
+            None => {
+                let (_ty_span, ty_val) = ty; // ty is &(Span, Type)
+                IVLCmd {
+                    span: cmd.span,
+                    kind: IVLCmdKind::Havoc {
+                        name: name.clone(),
+                        ty: ty_val.clone(),
+                    },
+                }
+            }
+        },
+
+        _ => todo!("cmd_to_ivlcmd: unsupported CmdKind in this phase"),
     }
 }
 
-// Weakest precondition of (assert-only) IVL programs comprised of a single
-// assertion
-fn wp(ivl: &IVLCmd, post: &Expr) -> (Expr, String) {
-    match &ivl.kind {
-        IVLCmdKind::Assert { condition, message } => (condition.clone().and(post), message.clone()),
-        IVLCmdKind::Assume { condition } => (condition.clone().imp(post), String::from("assume")),
-        IVLCmdKind::Seq( c1, c2) => { 
-            let (e, m) = wp(c2, post);
-            let (e1,m1) = wp(c1,&e);
-            (e1,m1)
-        },
-        IVLCmdKind::NonDet( c1, c2) => {
-            let (e1,m1) = wp(c1, post);
-            let (e2,m2) = wp(c2, post);
-            (e1.and(&e2), m2)
+/// NOTES-STYLE SWP:
+/// Given a command `cmd` and a set of goals `X`, compute the resulting set X':
+///
+///   swp(assert F, X)       =  {F} ∪ X
+///   swp(assume F, X)       =  { F ⇒ G | G ∈ X }
+///   swp(C1; C2, X)         =  swp(C1, swp(C2, X))
+///   swp(nondet(C1,C2), X)  =  swp(C1, X) ∪ swp(C2, X)
+///   swp(x := e, X)         =  { guard(e) ⇒ G[x := e] | G ∈ X }
+///   swp(havoc x, X)        =  (approx) { G | G ∈ X }   // refine later if needed
+fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
+    match &cmd.kind {
+        IVLCmdKind::Assert { condition, message } => {
+            let mut out = goals;
+            out.push(Obligation {
+                formula: condition.clone(),
+                span: cmd.span,
+                message: message.clone(),
+            });
+            out
         }
-        other => todo!("wp: Not supported (yet): {other:?}"),
+
+        IVLCmdKind::Assume { condition } => {
+            goals.into_iter().map(|g| Obligation {
+                formula: condition.clone().imp(&g.formula),
+                span: g.span,                 // keep original blame site
+                message: g.message,           // keep original message
+            }).collect()
+        }
+
+
+        IVLCmdKind::Seq(c1, c2) => {
+            let x2 = swp(c2, goals);
+            swp(c1, x2)
+        }
+
+        IVLCmdKind::NonDet(c1, c2) => {
+            let mut a = swp(c1, goals.clone());
+            let mut b = swp(c2, goals);
+            a.append(&mut b);
+            a
+        }
+
+        IVLCmdKind::Assignment { name, expr } => {
+            // swp(x := e, X) = { guard(e) ⇒ G[x := e] | G ∈ X }
+            let guards = expr_safety_guard(expr);
+            goals
+                .into_iter()
+                .map(|g| {
+                    let g_subst = subst_var_in_expr(&g.formula, name, expr);
+                    Obligation {
+                        formula: guards.clone().imp(&g_subst),
+                        span: cmd.span,
+                        message: "assignment might violate goal".to_owned(),
+                    }
+                })
+                .collect()
+        }
+
+        IVLCmdKind::Havoc { .. } => {
+            // Approximation: keep G unchanged. For stronger soundness one can freshen x (DSA)
+            // and substitute x := x_fresh in every G.
+            goals
+        }
     }
+}
+
+/// Conjoin all safety guards required to evaluate `e`.
+/// TODO: implement checks like (den != 0) for `/` and `%` by walking `e`.
+fn expr_safety_guard(_e: &Expr) -> Expr {
+    Expr::bool(true)
+}
+
+/// Substitute a variable by expression inside a goal formula (capture-avoiding).
+/// TODO: replace with your template's real substitution helper when available.
+fn subst_var_in_expr(goal: &Expr, _x: &Name, _e: &Expr) -> Expr {
+    // Stub for now so things compile; implement properly later.
+    goal.clone()
 }
