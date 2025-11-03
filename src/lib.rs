@@ -15,68 +15,82 @@ struct Obligation {
     formula: Expr,
     span: Span,
     message: String,
+
 }
 
 pub struct App;
+
+fn conj_or_true(it: impl Iterator<Item = Expr>) -> Expr {
+    return it.reduce(|a, b| a & b)
+                .unwrap_or(Expr::bool(true));
+}
 
 impl slang_ui::Hook for App {
     fn analyze(&self, cx: &slang_ui::Context, file: &slang::SourceFile) -> Result<()> {
         let mut solver = cx.solver()?;
 
         for m in file.methods() {
-            // 1) Merge method requires into a single Expr
-            let requires = m
-                .requires()
-                .cloned()
-                .reduce(|a, b| a & b)
-                .unwrap_or(Expr::bool(true));
+            // 1) Merge method requires and ensures into two single Expr
+            let requires = conj_or_true(m.requires().cloned());
+            let ensures = conj_or_true(m.ensures().cloned());
 
             // 2) If no body, nothing to verify
             let Some(body) = m.body.clone() else { continue; };
             let cmd = &body.cmd;
 
             // 3) Lower slang Cmd -> IVL, preserving spans
-            let ivl_root = cmd_to_ivlcmd(cmd);
+            let ivl_body = cmd_to_ivlcmd(cmd);
+
+            let ivl_root = IVLCmd {
+                span: ivl_body.span, // or a method-level span if you have one
+                kind: IVLCmdKind::Seq(
+                    Box::new(IVLCmd {
+                        span: m.span, // or any span you store for the requires block
+                        kind: IVLCmdKind::Assume { condition: requires.clone() },
+                    }),
+                    Box::new(ivl_body),
+                ),
+            };
 
             // 4) Initial goal set X0 (safety only for now: post = true)
             //    When you hook 'ensures' + 'return', change this to Ens[result := return_expr].
             let init_goal = Obligation {
-                formula: Expr::bool(true),
-                span: ivl_root.span,
-                message: "postcondition".to_owned(),
+                formula: ensures.clone(),      // G
+                span: m.span,          // precise span to blame if post doesn’t follow
+                message: "postcondition might not hold".to_owned(),
             };
             let goals0 = vec![init_goal];
 
             // 5) Notes-style SWP: (Cmd, X) -> X'
             let obligations = swp(&ivl_root, goals0);
 
-            // 6) Check each obligation independently under 'requires'
+            // 6) Check each obligation independently (they are *closed* now)
             for obl in obligations {
                 // Translate to SMT outside the closure so '?' uses outer Result type
-                let sreq = requires.smt(cx.smt_st())?;
                 let sobl = obl.formula.smt(cx.smt_st())?;
 
+                // Ask if the negation is SAT
                 solver.scope(|solver| -> Result<(), smtlib::Error> {
-                    solver.assert(sreq.as_bool()?)?;
                     solver.assert(!sobl.as_bool()?)?;
 
                     match solver.check_sat()? {
                         smtlib::SatResult::Sat => {
+                            // Counterexample exists -> obligation can fail
                             cx.error(obl.span, obl.message.clone());
+                            // If you want "first failure only", early-exit here by returning an error you catch outside.
                         }
                         smtlib::SatResult::Unknown => {
-                            cx.warning(
-                                obl.span,
-                                format!("{}: solver returned unknown", obl.message),
-                            );
+                            cx.warning(obl.span, format!("{}: solver returned unknown", obl.message));
                         }
-                        smtlib::SatResult::Unsat => { /* ok */ }
+                        smtlib::SatResult::Unsat => {
+                            // Obligation valid under all models -> OK
+                        }
                     }
                     Ok(())
-                })?;
-            }
+                }
+            )?;
         }
-
+        }
         Ok(())
     }
 }
@@ -87,12 +101,26 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
     match &cmd.kind {
         CmdKind::Assert { condition, .. } => IVLCmd {
             span: cmd.span,
-            kind: IVLCmdKind::Assert {
-                condition: condition.clone(),
-                message: "assertion might fail".to_owned(),
-            },
-        },
-
+            kind: IVLCmdKind::Seq(
+                Box::new(
+                    IVLCmd { 
+                        span: cmd.span, 
+                        kind: IVLCmdKind::Assert {
+                            condition: condition.clone(),
+                            message: "assertion might fail".to_owned()},
+                    }
+                ),
+                Box::new(
+                    IVLCmd { 
+                        span: cmd.span, 
+                        kind: IVLCmdKind::Assume { 
+                            condition: condition.clone() 
+                        }
+                    }
+                )
+            )        
+        }
+        ,
         CmdKind::Assume { condition } => IVLCmd {
             span: cmd.span,
             kind: IVLCmdKind::Assume {
@@ -179,6 +207,7 @@ fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
 fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
     match &cmd.kind {
         IVLCmdKind::Assert { condition, message } => {
+            // swp(assert R, X) = X ∪ { R }
             let mut out = goals;
             out.push(Obligation {
                 formula: condition.clone(),
@@ -186,28 +215,32 @@ fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
                 message: message.clone(),
             });
             out
-        }
+        },
 
         IVLCmdKind::Assume { condition } => {
+            // swp(assume A, X) = { A ⇒ G | G ∈ X }
             goals.into_iter().map(|g| Obligation {
                 formula: condition.clone().imp(&g.formula),
                 span: g.span,                 // keep original blame site
                 message: g.message,           // keep original message
             }).collect()
         }
-
-
+        ,
         IVLCmdKind::Seq(c1, c2) => {
+            // swp(S;T, X) = swp(S, swp(T, X))
             let x2 = swp(c2, goals);
             swp(c1, x2)
         }
-
+        ,
         IVLCmdKind::NonDet(c1, c2) => {
+            // swp(S ⫾ T, X) = swp(S, X) ∪ swp(T, X)
             let mut a = swp(c1, goals.clone());
             let mut b = swp(c2, goals);
             a.append(&mut b);
             a
         }
+        
+        _ => { todo!("Not implemented yet")},
 
         IVLCmdKind::Assignment { name, expr } => {
             // swp(x := e, X) = { guard(e) ⇒ G[x := e] | G ∈ X }
