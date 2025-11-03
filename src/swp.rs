@@ -1,6 +1,7 @@
 use crate::slang::ast::{Expr};
 use crate::slang::Span;
 use crate::ivl::{IVLCmd, IVLCmdKind};
+use crate::utils::{expr_safety_guards, subst_var_in_expr};
 
 #[derive(Debug, Clone)]
 pub struct Obligation {
@@ -32,21 +33,21 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
             let mut b = swp(c2, goals);
             a.append(&mut b);
             a
+        },
+
+        IVLCmdKind::Assignment { name, expr } => {
+            let mut out = Vec::new();
+            for (guard, sp, msg) in expr_safety_guards(expr) {
+                out.push(Obligation { formula: guard, span: sp, message: msg });
+            }
+            for g in goals {
+                let g_subst = subst_var_in_expr(&g.formula, &name.ident, expr);
+                out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
+            }
+            out
         }
-
+        
         _ => {todo!("Not yet implemented")}
-
-        // IVLCmdKind::Assignment { name, expr } => {
-        //     let mut out = Vec::new();
-        //     for (guard, sp, msg) in expr_safety_guards(expr) {
-        //         out.push(Obligation { formula: guard, span: sp, message: msg });
-        //     }
-        //     for g in goals {
-        //         let g_subst = subst_var_in_expr(&g.formula, name, expr);
-        //         out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
-        //     }
-        //     out
-        // }
 
         // IVLCmdKind::Havoc { .. } => goals,
     }

@@ -98,6 +98,13 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             }
         },
 
+        CmdKind::Assignment { name, expr } => {
+            IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Assignment { name: name.clone(),  expr: expr.clone() }
+            }
+        }
+
         _ => todo!("cmd_to_ivlcmd: unsupported CmdKind in this phase"),
     }
 }
