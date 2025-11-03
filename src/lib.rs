@@ -7,11 +7,14 @@ use slang_ui::prelude::*;
 pub mod swp;
 pub mod utils;
 pub mod lowering;
+pub mod dsa;
 
 use swp::swp;
 use utils::{conj_or_true};
 use lowering::cmd_to_ivlcmd;
 use swp::Obligation;
+use dsa::*;
+
 
 pub struct App;
 
