@@ -124,6 +124,8 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             }
         }
 
+
+        // THIS IS WORK IN PROGRESS (should work for bounded loops)
         CmdKind::For { name, range, invariants, variant: _, body } => {
             // for i in start..end { B } ≡ i := start; while (i < end) invariant I { B; i := i + 1 }
             let (start, end) = match range {
