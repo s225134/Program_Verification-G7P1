@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::ivl::{IVLCmd, IVLCmdKind};
 use slang::ast::{Cmd, CmdKind, Expr, Op, Type};
-use slang_ui::prelude::*;
+use slang_ui::prelude::{slang::ast::MethodRef, *};
 
 /// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
 /// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
@@ -124,50 +124,17 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             }
         }
 
-
-        // THIS IS WORK IN PROGRESS (should work for bounded loops)
-        CmdKind::For { name, range, invariants, variant: _, body } => {
-            // for i in start..end { B } ≡ i := start; while (i < end) invariant I { B; i := i + 1 }
-            let (start, end) = match range {
-                slang::ast::Range::FromTo(start, end) => (start, end),
-            };
-
-            // i := start
-            let init = IVLCmd {
-                span: cmd.span,
-                kind: IVLCmdKind::Assignment {
-                    name: name.clone(),
-                    expr: start.clone(),
-                },
-            };
-            // while (i < end) { body; i := i + 1 }
-            let i_expr = Expr::ident(name.as_str(), &Type::Int).with_span(name.span);
-            let cond  = Expr::op(&i_expr, Op::Lt, end).with_span(cmd.span);
-
-            let body_ivl = cmd_to_ivlcmd(&body.cmd); // Block → &Cmd
-            let one      = Expr::num(1).with_span(cmd.span);
-            let next_i   = Expr::op(&i_expr, Op::Add, &one).with_span(cmd.span);
-            let incr     = IVLCmd {
-                span: cmd.span,
-                kind: IVLCmdKind::Assignment { name: name.clone(), expr: next_i },
-            };
-            let while_body = IVLCmd {
-                span: cmd.span,
-                kind: IVLCmdKind::Seq(Box::new(body_ivl), Box::new(incr)),
-            };
-
-            let while_cmd = IVLCmd {
-                span: cmd.span,
-                kind: IVLCmdKind::While {
-                    condition: cond,
-                    invariants: invariants.clone(),
-                    variant: None,
-                    body: Box::new(while_body),
-                },
-            };
+        CmdKind::MethodCall{ name, fun_name, args, method } => {
+            let name = name.clone().expect("MethodCall without a result variable not supported yet");
+            let method_name = method.get().map(|m| m.name.clone());
             IVLCmd {
                 span: cmd.span,
-                kind: IVLCmdKind::Seq(Box::new(init), Box::new(while_cmd)),
+                kind: IVLCmdKind::MethodCall { 
+                    name,
+                    fun_name: fun_name.clone(),
+                    args: args.clone(),
+                    method: method_name,
+                }
             }
         }
 

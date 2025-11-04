@@ -1,4 +1,4 @@
-use crate::slang::ast::{Expr};
+use crate::slang::ast::{Expr, Type};
 use crate::slang::Span;
 use crate::ivl::{IVLCmd, IVLCmdKind};
 use crate::utils::{expr_safety_guards, subst_var_in_expr};
@@ -42,6 +42,27 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
             }
             for g in goals {
                 let g_subst = subst_var_in_expr(&g.formula, &name.ident, expr);
+                out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
+            }
+            out
+        },
+
+        IVLCmdKind::MethodCall { name, fun_name: _, args: _, method: _ } => {
+            let mut out = Vec::new();
+            for g in goals {
+                let ret_var = Expr::ident(&name.ident, &Type::Bool).with_span(cmd.span);
+                let g_subst = subst_var_in_expr(&g.formula, &name.ident, &ret_var);
+                out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
+            }
+            out
+        },
+        
+        IVLCmdKind::Havoc { name, ty: _ } => {
+            let mut out = Vec::new();
+            for g in goals {
+                // Create a fresh variable of the same name
+                let havoc_var = Expr::ident(&name.ident, &Type::Bool).with_span(cmd.span);
+                let g_subst = subst_var_in_expr(&g.formula, &name.ident, &havoc_var);
                 out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
             }
             out

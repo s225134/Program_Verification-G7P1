@@ -20,4 +20,5 @@ pub enum IVLCmdKind {
 
     Seq(Box<IVLCmd>, Box<IVLCmd>),
     NonDet(Box<IVLCmd>, Box<IVLCmd>),
+    MethodCall { name: Name, fun_name: Name, args: Vec<Expr>, method: Option<Name> },
 }
