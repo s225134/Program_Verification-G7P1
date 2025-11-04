@@ -1,11 +1,13 @@
+use std::fmt;
+
 use crate::ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr};
+use slang::ast::{Cmd, CmdKind, Expr, Op};
 use slang_ui::prelude::*;
 
 /// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
 /// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
 pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
-    match &cmd.kind {
+    match &cmd.kind { // take care of masked errors too
         CmdKind::Assert { condition, .. } => IVLCmd {
             span: cmd.span,
             kind: IVLCmdKind::Seq(
@@ -98,6 +100,34 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             }
         },
 
-        _ => todo!("cmd_to_ivlcmd: unsupported CmdKind in this phase"),
+        CmdKind::Assignment { name, expr } => {
+            IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Assignment { name: name.clone(),  expr: expr.clone() }
+            }
+        },
+
+        CmdKind::Return { expr } => {
+            match expr {
+                Some(e) => {
+                    let res = 
+                    Expr::ident("result", &e.ty)
+                        .with_span(e.span);
+                    let eq  = Expr::op(&res, Op::Eq, e).with_span(cmd.span);
+
+                    IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: eq } }
+                }
+                None => {
+                    // void-style return; nothing to constrain
+                    IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(true) } }
+                }
+            }
+        }
+
+
+
+        _ => todo!("cmd_to_ivlcmd: unsupported CmdKind in this phase: {:?}", cmd.kind),
     }
 }
+
+// missing break, continue, for, loop, return, methodcall

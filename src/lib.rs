@@ -2,16 +2,19 @@ pub mod ivl;
 mod ivl_ext;
 
 use ivl::{IVLCmd, IVLCmdKind};
-use slang_ui::prelude::*;
+use slang_ui::prelude::{slang::ast::{Cmd, Expr}, *};
 
 pub mod swp;
 pub mod utils;
 pub mod lowering;
+pub mod dsa;
 
 use swp::swp;
-use utils::{conj_or_true};
+use utils::{conj_or_true, subst_result_in_expr};
 use lowering::cmd_to_ivlcmd;
 use swp::Obligation;
+use dsa::*;
+
 
 pub struct App;
 
@@ -23,7 +26,37 @@ impl slang_ui::Hook for App {
         for m in file.methods() { 
             // 1) Merge method requires and ensures into two single Expr 
             let requires = conj_or_true(m.requires().cloned()); 
-            let ensures = conj_or_true(m.ensures().cloned()); 
+
+            // Build initial goals: one per ensures clause, each with its own span.
+            let mut goals0: Vec<Obligation> = Vec::new();
+
+            for ens in m.ensures() {
+                // 1) normalize `result` → Ident("result", ret_ty)
+                let f = match &m.return_ty {
+                    // m.return_ty: Option<(Span, Type)>
+                    Some((_, ty)) => {
+                        let res_id = Expr::ident("result", &ty).with_span(ens.span);
+                        subst_result_in_expr(ens, &res_id)
+                    }
+                    None => ens.clone(),
+                };
+
+                // 2) push one obligation per ensures, preserving span
+                goals0.push(Obligation {
+                    formula: f,
+                    span: ens.span,
+                    message: "postcondition might not hold".to_owned(),
+                });
+            }
+
+            // If there are no ensures, you can default to `true` (optional)
+            if goals0.is_empty() {
+                goals0.push(Obligation {
+                    formula: Expr::bool(true).with_span(m.span),
+                    span: m.span,
+                    message: "postcondition (trivial)".to_owned(),
+                });
+            }
             
             // 2) If no body, nothing to verify 
             let Some(body) = m.body.clone() else { continue; }; 
@@ -44,20 +77,13 @@ impl slang_ui::Hook for App {
                     Box::new(ivl_body), ), 
                 }; 
             
-            // 4) Initial goal set X0 (safety only for now: post = true) 
-            // When you hook 'ensures' + 'return', change this to Ens[result := return_expr]. 
-            let init_goal = Obligation { 
-                formula: ensures.clone(), // G 
-                span: m.span, // precise span to blame if post doesn’t follow 
-                message: "postcondition might not hold".to_owned(), }; 
-            
-            let goals0 = vec![init_goal]; 
             
             // 5) Notes-style SWP: (Cmd, X) -> X' 
             let obligations = swp(&ivl_root, goals0); 
             
             // 6) Check each obligation independently (they are *closed* now) 
             for obl in obligations { 
+                println!("{:?}", obl.formula);
                 // Translate to SMT outside the closure so '?' uses outer Result type 
                 let sobl = obl.formula.smt(cx.smt_st())?; 
                 
