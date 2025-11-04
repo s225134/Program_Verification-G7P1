@@ -83,13 +83,7 @@ impl std::fmt::Display for IVLCmd {
             IVLCmdKind::Assert { condition, .. } => write!(f, "assert {condition}"),
             IVLCmdKind::Seq(c1, c2) => write!(f, "{c1} ; {c2}"),
             IVLCmdKind::NonDet(c1, c2) => write!(f, "{{ {c1} }} [] {{ {c2} }}"),
-            IVLCmdKind::MethodCall { name, fun_name, args, .. } => {
-                let args_str = args.iter()
-                    .map(|arg| format!("{arg}"))   
-                    .collect::<Vec<String>>()
-                    .join(", ");
-                write!(f, "{} := call {}({})", name, fun_name, args_str)
-            }
+            IVLCmdKind::MethodCall { name, fun_name, args, .. } => write!(f, "{name} := call {fun_name}({args:?})"),
         }
     }
 }
