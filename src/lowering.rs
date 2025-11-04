@@ -1,7 +1,7 @@
 use std::fmt;
 
 use crate::ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, Op};
+use slang::ast::{Cmd, CmdKind, Expr, Op, Type};
 use slang_ui::prelude::*;
 
 /// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
@@ -124,9 +124,72 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             }
         }
 
+        CmdKind::For { name, range, invariants, variant: _, body } => {
+            // for i in start..end { B } ≡ i := start; while (i < end) invariant I { B; i := i + 1 }
+            let (start, end) = match range {
+                slang::ast::Range::FromTo(start, end) => (start, end),
+            };
 
+            // i := start
+            let init = IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Assignment {
+                    name: name.clone(),
+                    expr: start.clone(),
+                },
+            };
+            // while (i < end) { body; i := i + 1 }
+            let i_expr = Expr::ident(name.as_str(), &Type::Int).with_span(name.span);
+            let cond  = Expr::op(&i_expr, Op::Lt, end).with_span(cmd.span);
 
-        _ => todo!("cmd_to_ivlcmd: unsupported CmdKind in this phase: {:?}", cmd.kind),
+            let body_ivl = cmd_to_ivlcmd(&body.cmd); // Block → &Cmd
+            let one      = Expr::num(1).with_span(cmd.span);
+            let next_i   = Expr::op(&i_expr, Op::Add, &one).with_span(cmd.span);
+            let incr     = IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Assignment { name: name.clone(), expr: next_i },
+            };
+            let while_body = IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Seq(Box::new(body_ivl), Box::new(incr)),
+            };
+
+            let while_cmd = IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::While {
+                    condition: cond,
+                    invariants: invariants.clone(),
+                    variant: None,
+                    body: Box::new(while_body),
+                },
+            };
+            IVLCmd {
+                span: cmd.span,
+                kind: IVLCmdKind::Seq(Box::new(init), Box::new(while_cmd)),
+            }
+        }
+
+        other => {
+            // Keep this list in sync with the arms you *do* handle
+            const SUPPORTED: &str = "Assert | Assume | Seq | Match | VarDefinition";
+
+            // Discriminant prints a stable id even if Debug isn't available
+            let discr = std::mem::discriminant(other);
+
+            // Most AST enums derive Debug; if CmdKind doesn't, add #[derive(Debug)] to it.
+            let found = format!("{other:#?}");
+
+            todo!(
+                "cmd_to_ivlcmd: unsupported CmdKind at {span:?}\n\
+                ├─ found: {found}\n\
+                ├─ discriminant: {discr:?}\n\
+                └─ expected one of: {SUPPORTED}\n\
+                help: add a new `match` arm in lowering.rs for this variant and return an `IVLCmdKind`.",
+                span = cmd.span,
+                found = found,
+                discr = discr
+            );
+        }
     }
 }
 
