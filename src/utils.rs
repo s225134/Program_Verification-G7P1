@@ -91,3 +91,35 @@ pub fn subst_var_in_expr(e: &Expr, x: &String, v: &Expr) -> Expr {
     }
 }
 
+pub fn subst_result_in_expr(e: &Expr, v: &Expr) -> Expr {
+    match &e.kind {
+        ExprKind::Result => {
+            v.clone()
+        }
+
+        // (lhs op rhs)
+        ExprKind::Infix(lhs, op, rhs) => {
+            let l = subst_result_in_expr(lhs, v);
+            let r = subst_result_in_expr(rhs, v);
+            Expr::op(&l, op.clone(), &r).with_span(e.span)
+        }
+
+        // op e
+        ExprKind::Prefix(op, inner) => {
+            let i = subst_result_in_expr(inner, v);
+            Expr::prefix(&i, op.clone()).with_span(e.span)
+        }
+
+        // ite(c, t, f)
+        ExprKind::Ite(c, t, f) => {
+            let c2 = subst_result_in_expr(c, v);
+            let t2 = subst_result_in_expr(t, v);
+            let f2 = subst_result_in_expr(f, v);
+            Expr::ite(&c2, &t2, &f2).with_span(e.span)
+        }
+
+        // everything else unchanged for now (calls/quantifiers can be added next)
+        _ => e.clone(),
+    }
+}
+
