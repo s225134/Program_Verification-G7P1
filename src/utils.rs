@@ -1,6 +1,6 @@
 use crate::slang::ast::{Expr, ExprKind, Op, Name};
 use crate::slang::{Span};
-
+use crate::slang::ast::{CmdKind, Cmd};
 
 
 
@@ -67,3 +67,43 @@ pub fn subst_result_in_expr(e: &Expr, v: &Expr) -> Expr {
     
 }
 
+/// Collect the syntactic write set of a command (variables that can be assigned in `c`).
+pub fn modified_vars(c: &Cmd, out: &mut Vec<Name>) {
+    match &c.kind {
+        CmdKind::Assignment { name, .. } => {
+            if !out.contains(name) { out.push(name.clone()); }
+        }
+        CmdKind::VarDefinition { name, .. } => {
+            // if your IVL treats uninitialized var as write, include it; optional
+            if !out.contains(name) { out.push(name.clone()); }
+        }
+        CmdKind::Seq(left,right) => {
+            modified_vars(&left, out);
+            modified_vars(&right, out);
+        }
+        CmdKind::MethodCall { name, .. } => {
+            match name {
+                None => {}
+                Some(n) => {if !out.contains(n) { out.push(n.clone());}}
+            }
+        }
+        CmdKind::For { name, range: _, invariants: _, variant: _, body } => {
+            modified_vars(&body.cmd, out);
+            out.push(name.clone());
+
+        }
+        CmdKind::Loop { invariants, variant, body } => {
+            for case in &body.cases {
+                modified_vars(&case.cmd, out);
+            }
+        }
+
+        CmdKind::Match { body: b } => {
+            for case in &b.cases {
+                modified_vars(&case.cmd, out);
+            }
+        }
+        // Add the rest of your writing constructs if any…
+        _ => {}
+    }
+}

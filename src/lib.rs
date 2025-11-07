@@ -27,34 +27,81 @@ impl slang_ui::Hook for App {
         let mut solver = cx.solver()?; 
         
         for fun in file.functions(){
-            let return_ty = match fun.return_ty.clone().1.smt(solver.st()) {
-                    Ok(ty) => ty,
-                    _ => panic!("Function return type must be a sort"),
-                };
-            let vars_ = fun.args.iter().map(|v| v.ty.1.smt(solver.st())).collect::<Result<Vec<_>, _>>()?;
+            let return_ty = fun.return_ty.clone().1.smt(solver.st())
+                .expect("Function return type must be a sort");
+            let vars_ = fun.args.iter()
+                .map(|v| v.ty.1.smt(solver.st()))
+                .collect::<Result<Vec<_>, _>>()?;
             solver.declare_fun(&smtlib::funs::Fun::new(solver.st(), &fun.name.ident, vars_, return_ty))?;
 
-            let pre = fun.requires();
-            let post = fun.ensures();
-
-            let pre = pre.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true));
-            let post_expr = Expr::call(fun.name.clone(),fun.args.iter().map(|a| Expr::ident(&a.name.ident, &a.ty.1)).collect::<Vec<_>>(),file.get_function_ref(fun.name.ident.clone()));
-            let post = post.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
-        
-            
-            let x = match &fun.body{
-                Some(b) => {
-                    // if (fun.ensures().count()>0){
-                    //     cx.error(fun.name.span, "we do not check post conditions for functions with bodies");
-                    // }
-                    // let eq = post_expr.eq(&b);
-                    let post_sub = post.subst_result(b);
-                    pre.imp(&post_sub)}
-                _ => pre.imp(&post),
+            // (b) convenience: build f(args) as an Expr
+            let call_expr = {
+                let args_exprs: Vec<Expr> = fun.args.iter()
+                    .map(|a| Expr::ident(&a.name.ident, &a.ty.1))
+                    .collect();
+                let fref: FunctionRef = file.get_function_ref(fun.name.ident.clone());
+                Expr::call(fun.name.clone(), args_exprs, fref)
             };
 
-            let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
-            solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
+            // (c) if the function has a body, assert the *definition* forall args. f(args) = body
+            if let Some(body) = &fun.body {
+                // IMPORTANT: no 'requires' guard here; we want definitional equality everywhere
+                let def_eq = call_expr.clone().eq(body);
+                let def_ax = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &def_eq);
+                solver.assert(def_ax.smt(solver.st())?.as_bool()?)?;
+            }
+
+            let pre = fun.requires().cloned()
+                .reduce(|a,b| a.and(&b))
+                .unwrap_or(Expr::bool(true));
+
+            let ensures_conj = fun.ensures().cloned()
+                .reduce(|a,b| a.and(&b))
+                .unwrap_or(Expr::bool(true))
+                .subst_result(&call_expr);
+
+            // let post = fun.ensures().cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
+        
+
+
+            let post_ax = Expr::quantifier(
+                slang::ast::Quantifier::Forall,
+                &fun.args,
+                &pre.imp(&ensures_conj)
+            );
+
+            let spost_ax = post_ax.smt(cx.smt_st())?;
+
+            // PROVE it once; don't assert it globally.
+            solver.scope(|s| -> Result<(), smtlib::Error> {
+                // use the outer state so the error type matches smtlib::Error
+                let phi = spost_ax.as_bool()?;
+                s.assert(!phi.clone())?;
+                match s.check_sat()? {
+                    smtlib::SatResult::Unsat => { /* ok */ }
+                    smtlib::SatResult::Sat => {
+                        cx.error(fun.name.span, "function ensures do not follow from the definition/requirements");
+                    }
+                    smtlib::SatResult::Unknown => {
+                        cx.warning(fun.name.span, "function ensures proof is unknown");
+                    }
+                }
+                Ok(())
+            })?;
+
+            // let x = match &fun.body{
+            //     Some(b) => {
+            //         // if (fun.ensures().count()>0){
+            //         //     cx.error(fun.name.span, "we do not check post conditions for functions with bodies");
+            //         // }
+            //         // let eq = post_expr.eq(&b);
+            //         let post_sub = post.subst_result(b);
+            //         pre.imp(&post_sub)}
+            //     _ => pre.imp(&post),
+            // };
+
+            // let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
+            // solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
                 
         }
 
@@ -147,7 +194,6 @@ impl slang_ui::Hook for App {
             
             // 6) Check each obligation independently (they are *closed* now) 
             for obl in obligations { 
-                println!("{:?}", obl.formula);
                 // Translate to SMT outside the closure so '?' uses outer Result type 
                 let sobl = obl.formula.smt(cx.smt_st())?; 
                 
