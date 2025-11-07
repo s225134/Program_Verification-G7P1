@@ -101,20 +101,20 @@ impl slang_ui::Hook for App {
                 // Declare the function in the SMT solver: f(args...) -> return_ty
                 solver.declare_fun(&smtlib::funs::Fun::new(solver.st(), &fun.name.ident, vars_, return_ty))?;
                 
-                //get pre and post conditions
+                // get pre and post conditions
                 let pre = fun.requires();
                 let post = fun.ensures();
 
-                //combined the pre and post conditinos, along with substituting 'result' in ensures clauses with f(args...)
+                // combined the pre and post conditinos, along with substituting 'result' in ensures clauses with f(args...)
                 let pre = pre.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true));
                 let post_expr = Expr::call(fun.name.clone(),fun.args.iter().map(|a| Expr::ident(&a.name.ident, &a.ty.1)).collect::<Vec<_>>(),file.get_function_ref(fun.name.ident.clone()));
                 let post = post.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
 
-                //implication
+                // implication
                 let x = pre.imp(&post);
-                //building quantifier form implication
+                // building quantifier form implication
                 let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
-                //assert the quanitfier
+                // assert the quanitfier
                 solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
                 
 
@@ -136,7 +136,7 @@ impl slang_ui::Hook for App {
             let mut goals0: Vec<Obligation> = Vec::new();
 
             for ens in m.ensures() {
-                // 1) normalize `result` → Ident("result", ret_ty)
+                // 1) normalize result -> Ident("result", ret_ty)
                 let f = match &m.return_ty {
                     // m.return_ty: Option<(Span, Type)>
                     Some((_, ty)) => {
@@ -154,7 +154,7 @@ impl slang_ui::Hook for App {
                 });
             }
 
-            // If there are no ensures, you can default to `true` (optional)
+            // If there are no ensures, you can default to true
             if goals0.is_empty() {
                 goals0.push(Obligation {
                     formula: Expr::bool(true).with_span(m.span),
@@ -174,22 +174,22 @@ impl slang_ui::Hook for App {
                     .map(|e| Cmd::assert(&e, "Dummy parameter assertion to fix smt error."))
                     .fold(Cmd::assert(&Expr::bool(true), "Dummy"), |acc, pa| acc.seq(&pa));
 
-            // ensure the borrow ends before we assign back:
+            // ensure the borrow ends before we assign back
             let new_cmd = {
-                let current: &Cmd = body.cmd.as_ref();      // borrow the existing command
-                params_assertion.seq(current)              // produce an owned Cmd
+                let current: &Cmd = body.cmd.as_ref(); 
+                params_assertion.seq(current) 
             };
-            body.cmd = Box::new(new_cmd);                   // replace it
+            body.cmd = Box::new(new_cmd);
             
 
             // 3) Lower slang Cmd -> IVL, preserving spans 
             let ivl_body = cmd_to_ivlcmd_with_ensures(&body.cmd, &goals0);
              
             let ivl_root = IVLCmd { 
-                span: m.span, // or a method-level span if you have one 
+                span: m.span,
                 kind: IVLCmdKind::Seq( 
                     Box::new(IVLCmd { 
-                        span: m.span, // or any span you store for the requires block 
+                        span: m.span,
                         kind: IVLCmdKind::Assume { 
                             condition: requires.clone() 
                         }, 
@@ -202,7 +202,7 @@ impl slang_ui::Hook for App {
             // 5) Notes-style SWP: (Cmd, X) -> X' 
             let obligations = swp(&ivl_root, goals0); 
             
-            // 6) Check each obligation independently (they are *closed* now) 
+            // 6) Check each obligation independently
             for obl in obligations { 
                 // Translate to SMT outside the closure so '?' uses outer Result type 
                 let sobl = obl.formula.smt(cx.smt_st())?; 

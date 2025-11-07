@@ -14,8 +14,6 @@ fn fresh_tmp(name: &str, _ty: &slang::ast::Type, span: slang::Span) -> slang::as
     slang::ast::Name { span, ident }
 }
 
-/// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
-/// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
 pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCmd {
     match &cmd.kind { // take care of masked errors too
         CmdKind::Assert { condition, .. } => IVLCmd {
@@ -56,8 +54,6 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
             }
         }
 
-        // Encode 'match' as a nondet over guarded branches: assume g; branch_cmd
-        // (Sound but possibly over-strict vs ordered semantics; refine later if needed.)
         CmdKind::Match { body } => {
             let mut cases_ivl: Vec<IVLCmd> = Vec::new();
             for case in &body.cases {
@@ -128,18 +124,16 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
         },
 
         CmdKind::Return { expr } => {
-            // Build: [ (optional) assume result == e ; ] assert Ens1 ; ... ; assert Ensk ; assume false
             let mut seq: Option<IVLCmd> = None;
 
             if let Some(e) = expr {
-                // (a) relate `result` to `e` so posts that mention result talk about this value
                 let res = Expr::ident("result", &e.ty).with_span(e.span);
                 let eq  = Expr::op(&res, Op::Eq, e).with_span(cmd.span);
                 let a   = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: eq } };
                 seq = Some(a);
             }
 
-            // (b) assert each method postcondition here (use each post’s span for sharp blame)
+            // (b) assert each method postcondition
             for phi in ensures {
                 let a = IVLCmd {
                     span: phi.span,
@@ -157,22 +151,21 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
             // (c) cut the path
             let cut = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } };
             match seq {
-                None => cut, // void return, no posts? then just cut; (if posts exist, seq is Some and we fall below)
+                None => cut,
                 Some(acc) => IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(acc), Box::new(cut)) }
             }
         }
 
         CmdKind::Loop { invariants, variant, body } => {
-            // ----- Mod := union of writes in all guarded bodies -----
             let mut modset = HashSet::<_>::new();
             for case in &body.cases { modset.extend(case.cmd.clone().assigned_vars().clone()); }
 
-            // ----- 1) Entry VC: one Assert per invariant (preserve spans) -----
+            // 1) Entry VC: one Assert per invariant
             // Build a left-associated Seq of per-invariant asserts.
             let mut seq: Option<IVLCmd> = None;
             for inv in invariants {
                 let a = IVLCmd {
-                    span: inv.span, // <— precise blame location
+                    span: inv.span,
                     kind: IVLCmdKind::Assert {
                         condition: inv.clone(),
                         message: "loop invariant might not hold on entry".to_owned(),
@@ -202,14 +195,14 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
 
             let mut seq = seq.unwrap_or(IVLCmd::assert(&Expr::bool(true), "Skip"));
 
-            // ----- 2) havoc Mod; then one Assume per invariant (keep spans) -----
+            // 2) havoc Mod; then one Assume per invariant
             for x in &modset {
                 let ty = &x.1;
                 let h = IVLCmd { span: cmd.span, kind: IVLCmdKind::Havoc { name: x.0.clone(), ty: ty.clone() } };
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(h)) };
             }
 
-            // ----- 2b) assume each invariant
+            // 2b) assume each invariant
             for inv in invariants {
                 let as_inv = IVLCmd {
                     span: inv.span, // <— also attribute the assume to the invariant itself
@@ -225,22 +218,20 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(asv)) };
             }
 
-            // ----- 3) For each branch: { assume bi; v := V(m); enc(Ci); (assert each inv); assert v < V(m);assume false } ⫴ { assume !bi; skip } -----
+            // 3) For each branch: { assume bi; v := V(m); enc(Ci); (assert each inv); assert v < V(m);assume false } ⫴ { assume !bi; skip } -----
             for (i,case) in enumerate(&body.cases) {
 
                 let bi = case.condition.clone(); // bi
-
-                // then: assume bi; enc(Ci); assert I1; ...; assert Im; assume false
                 let mut then_seq = IVLCmd { 
                     span: bi.span, 
                     kind: IVLCmdKind::Assume { condition: bi.clone() }  // assume bi
                 };
 
-                // if variant exists, havoc tmp; assume tmp == variant;
+                // if variant exists, havoc tmp then assume tmp == variant;
                 if let Some(t) = variant { 
-                    // Make a fresh temp __var_old : Int and tie it to current t via Assume (__var_old == t)
+                    // Make a fresh
                     let tmp = fresh_tmp("variant_old", &t.ty, t.span); // or t.ty if you track it
-                    // Declare tmp by Havoc (so the solver knows it); then constrain it.
+                    // Declare tmp by Havoc; then constrain it.
                     let decl = IVLCmd { span: t.span, kind: IVLCmdKind::Havoc { name: tmp.clone(), ty: slang::ast::Type::Int } };
                     //// let dummy_variant = IVLCmd::assert(&Expr::ident(&tmp.ident, &t.ty), "Dummy assertion variant");
                     let eq   = Expr::op(&Expr::ident(&tmp.ident, &slang::ast::Type::Int).with_span(t.span), Op::Eq, t).with_span(t.span);
@@ -255,7 +246,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 let enc_ci  = cmd_to_ivlcmd_with_ensures(&case.cmd, ensures);
                 then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(enc_ci)) };
 
-                // per-invariant preservation asserts, each with its own span
+                // per-invariant preservation asserts
                 for inv in invariants {
                     let assert_pres = IVLCmd {
                         span: inv.span, // <— blame the exact invariant that fails to be preserved
@@ -267,7 +258,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                     then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(assert_pres)) };
                 }
 
-                // NEW: assert strict decrease t < t_old on taken iteration
+                // assert strict decrease t < t_old on taken iteration
                 if let Some(t) = variant {
                     let tmp = fresh_tmp("variant_old", &t.ty, t.span);
                     let t_old = Expr::ident(&tmp.ident, &t.ty).with_span(t.span);
@@ -285,7 +276,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 let cut = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } };
                 then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(cut)) };
 
-                // else: assume !bi; skip   (this accumulates ¬bi for the survivor path)
+                // else: assume !bi; skip
                 let else_branch = IVLCmd {
                     span: bi.span,
                     kind: IVLCmdKind::Assume { condition: Expr::not(bi) } 
@@ -295,9 +286,6 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 let nondet = IVLCmd { span: cmd.span, kind: IVLCmdKind::NonDet(Box::new(then_seq), Box::new(else_branch)) };
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(nondet)) };
             }
-
-            // Done. The survivor path has all `Assume inv` plus every `assume !bi`.
-            // That yields I ∧ ∧i ¬bi as the post fact for code after the loop.
             seq
 
         }
@@ -312,7 +300,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
             let lt = Expr::op(&i_expr, Op::Lt, &hi).with_span(cmd.span);
             let guard = Expr::op(&ge, Op::And, &lt).with_span(cmd.span);
 
-            // ----- 1) Entry VC: assert I with i := L -----
+            // 1) Entry VC: assert I with i := L
             let mut seq: IVLCmd = IVLCmd::nop();
             for inv in invariants {
                 let inv_at_L = subst_var_in_expr(inv, &name.ident, &lo);   // i -> L
@@ -326,14 +314,14 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(a)) };
             }
 
-            // ----- 2) Havoc loop-carried state and DECLARE i, then assume I -----
+            // 2) Havoc loop-carried state and DECLARE i, then assume I
             let mut modset = body.cmd.clone().assigned_vars();
             modset.retain(|(n, _ty)| n.ident != name.ident);        // exclude i
             for (n, ty) in &modset {
                 let h = IVLCmd { span: cmd.span, kind: IVLCmdKind::Havoc { name: n.clone(), ty: ty.clone() } };
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(h)) };
             }
-            // declare i so using it in assumes is well-formed
+            
             seq = IVLCmd {
                 span: name.span,
                 kind: IVLCmdKind::Seq(
@@ -347,7 +335,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(as_inv)) };
             }
 
-            // ----- 3) One-step: assume guard; C; assert I with i := i+1; assume false -----
+            // 3) One-step: assume guard; C; assert I with i := i+1; assume false
             let mut then_seq = IVLCmd { span: guard.span, kind: IVLCmdKind::Assume { condition: guard.clone() } };
             let enc_body = cmd_to_ivlcmd_with_ensures(&body.cmd, ensures);
             then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(enc_body)) };
@@ -367,10 +355,10 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
             }
             then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } })) };
 
-            // else: assume ¬guard
+            // else: assume !guard
             let else_branch = IVLCmd { span: guard.span, kind: IVLCmdKind::Assume { condition: Expr::op(&guard, Op::Imp, &Expr::bool(false)).with_span(guard.span) } };
 
-            // ----- 4) Nondet branch -----
+            // 4) Nondet branch
             let nondet = IVLCmd { span: cmd.span, kind: IVLCmdKind::NonDet(Box::new(then_seq), Box::new(else_branch)) };
             IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(nondet)) }
         }
@@ -404,7 +392,6 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                         .with_span(&cmd.span);
             }
 
-            // --- evaluate actuals once: tmp{i} := arg{i} ---
             let mut ivl = IVLCmd::nop();
             let mut tmps: Vec<Expr> = Vec::with_capacity(args.len());
             for (i, ei) in args.iter().enumerate() {
@@ -413,7 +400,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                     IVLCmd::seq(&IVLCmd::assert(ex, msg).with_span(sp), &IVLCmd::assume(ex).with_span(sp))
                 }).collect();
                 ivl = ivl.seq(&IVLCmd::seqs(&guards_assertions)); // check conditions
-                
+
                 let tmp_name = met.args[i].name.prefix(&format!("tmp{i}"));
                 let tmp_ty   = met.args[i].ty.1.clone();
                 let tmp_expr = Expr::ident(&tmp_name.ident, &tmp_ty);
@@ -421,7 +408,6 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 tmps.push(tmp_expr);
             }
 
-            // tiny inline substitution: substitute each formal with its tmp
             let subst_formals = |e: &Expr| {
                 let mut r = e.clone();
                 for (i, v) in met.args.iter().enumerate() {
@@ -430,12 +416,39 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 r
             };
 
-            // --- assert every requires separately (preserve span + message) ---
             for spec in &met.specifications {
                 if let Specification::Requires { span: _, expr } = spec {
                     let e_sub = subst_formals(expr);
                     let msg = format!("Precondition {} might not hold", expr); // or use attached message if your enum has one
                     ivl = ivl.seq(&IVLCmd::assert(&e_sub, &msg).with_span(&cmd.span));
+                }
+            }
+
+            // --- total correctness for direct recursion (EF7): variant checks ---
+            if fun_name.ident == met.name.ident {
+                if let Some(v) = &met.variant {
+                    // v_here: variant at the current frame (uses formals as-is)
+                    let v_here = v.clone();
+
+                    // v_call: variant at callee entry with actuals (use evaluated tmps)
+                    let v_call = {
+                        let mut r = v.clone();
+                        for (i, formal) in met.args.iter().enumerate() {
+                            r = r.subst_ident(&formal.name.ident, &tmps[i]);
+                        }
+                        r
+                    };
+
+                    // Well-foundedness on Int: both must be non-negative
+                    let ge0_here = Expr::op(&v_here, Op::Ge, &Expr::num(0).with_span(v.span)).with_span(v.span);
+                    ivl = ivl.seq(&IVLCmd::assert(&ge0_here, "variant must be non-negative in current frame").with_span(&cmd.span));
+
+                    let ge0_call = Expr::op(&v_call, Op::Ge, &Expr::num(0).with_span(v.span)).with_span(v.span);
+                    ivl = ivl.seq(&IVLCmd::assert(&ge0_call, "variant must be non-negative for recursive call").with_span(&cmd.span));
+
+                    // Strict decrease across the recursive call
+                    let dec = Expr::op(&v_here, Op::Gt, &v_call).with_span(v.span);
+                    ivl = ivl.seq(&IVLCmd::assert(&dec, "variant must strictly decrease for recursive call").with_span(&cmd.span));
                 }
             }
 

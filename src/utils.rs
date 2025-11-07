@@ -3,15 +3,12 @@ use slang_ui::prelude::slang::ast::{Name, Type};
 use crate::slang::ast::{Expr, ExprKind, Op};
 use crate::slang::{Span};
 
-
-
 pub fn conj_or_true(it: impl Iterator<Item = Expr>) -> Expr {
     it.reduce(|a, b| a & b).unwrap_or(Expr::bool(true))
 }
 
-
-/// Collect all "safety" guards required to evaluate an expression.
-/// Example: for `a / (b - 1)` we get one guard `(b - 1) != 0`.
+/// colect all safety guards required to evaluate an expression.
+/// example: for a / (b - 1) we get one guard (b - 1) != 0.
 pub fn expr_safety_guards(expr: &Expr) -> Vec<(Expr, Span, String)> {
     let mut out = Vec::new();
     collect_guards(expr, &mut out);
@@ -58,7 +55,7 @@ fn collect_guards(e: &Expr, out: &mut Vec<(Expr, Span, String)>) {
     }
 }
 
-/// Make a fresh tmp name based on a formal name (alpha-renaming friendly).
+/// Make a fresh tmp name based on a formal name.
 pub fn fresh_tmp_like(formal: &Name, i: usize) -> Name {
     formal.prefix(&format!("tmp{}", i))
 }
