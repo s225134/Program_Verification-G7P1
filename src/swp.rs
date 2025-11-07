@@ -3,7 +3,7 @@ use slang_ui::prelude::slang::ast::Var;
 use crate::slang::ast::{Expr, Type, Quantifier};
 use crate::slang::Span;
 use crate::ivl::{IVLCmd, IVLCmdKind};
-use crate::utils::{expr_safety_guards, subst_var_in_expr};
+use crate::utils::{expr_safety_guards};
 
 #[derive(Debug, Clone)]
 pub struct Obligation {
@@ -43,7 +43,7 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
                 out.push(Obligation { formula: guard, span: sp, message: msg });
             }
             for g in goals {
-                let g_subst = subst_var_in_expr(&g.formula, &name.ident, expr);
+                let g_subst = Expr::subst_ident(&g.formula, &name.ident, expr);
                 out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
             }
             out
@@ -53,7 +53,7 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
             let mut out = Vec::new();
             for g in goals {
                 let ret_var = Expr::ident(&name.ident, &Type::Bool).with_span(cmd.span);
-                let g_subst = subst_var_in_expr(&g.formula, &name.ident, &ret_var);
+                let g_subst = Expr::subst_ident(&g.formula, &name.ident, &ret_var);
                 out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
             }
             out

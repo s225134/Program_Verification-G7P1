@@ -1,14 +1,22 @@
-use std::{collections::HashSet, fmt, ops::Not};
+use std::{collections::HashSet, ops::Not};
 
-use crate::ivl::{IVLCmd, IVLCmdKind};
+use crate::{ivl::{IVLCmd, IVLCmdKind}, swp::Obligation};
 use itertools::enumerate;
-use slang::ast::{Cmd, CmdKind, Expr, Op, Type, Name};
-use slang_ui::prelude::{slang::ast::MethodRef, *};
-use crate::utils::{conj_or_true, modified_vars};
+use slang::ast::{Cmd, CmdKind, Expr, Op};
+use slang_ui::prelude::*;
+
+
+fn fresh_tmp(name: &str, ty: &slang::ast::Type, span: slang::Span) -> slang::ast::Name {
+    // Any freshening scheme; even suffixing a counter is fine for now.
+    // If you don't have a global gensym, use a monotonic static or UUID.
+    let ident = format!("__tmp_{}_{}", name, span.start()); 
+    slang::ast::Name { span, ident }
+}
+
 
 /// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
 /// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
-pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
+pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCmd {
     match &cmd.kind { // take care of masked errors too
         CmdKind::Assert { condition, .. } => IVLCmd {
             span: cmd.span,
@@ -29,7 +37,7 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
                         }
                     }
                 )
-            )        
+            )
         }
         ,
         CmdKind::Assume { condition } => IVLCmd {
@@ -40,8 +48,8 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
         },
 
         CmdKind::Seq(c1, c2) => {
-            let left = cmd_to_ivlcmd(c1);
-            let right = cmd_to_ivlcmd(c2);
+            let left = cmd_to_ivlcmd_with_ensures(c1, ensures);
+            let right = cmd_to_ivlcmd_with_ensures(c2, ensures);
             IVLCmd {
                 span: cmd.span,
                 kind: IVLCmdKind::Seq(Box::new(left), Box::new(right)),
@@ -59,7 +67,7 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
                         condition: case.condition.clone(),
                     },
                 };
-                let branch_cmd = cmd_to_ivlcmd(&case.cmd);
+                let branch_cmd = cmd_to_ivlcmd_with_ensures(&case.cmd, ensures);
                 let seq_case = IVLCmd {
                     span: case.cmd.span,
                     kind: IVLCmdKind::Seq(Box::new(assume_g), Box::new(branch_cmd)),
@@ -120,19 +128,37 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
         },
 
         CmdKind::Return { expr } => {
-            match expr {
-                Some(e) => {
-                    let res = 
-                    Expr::ident("result", &e.ty)
-                        .with_span(e.span);
-                    let eq  = Expr::op(&res, Op::Eq, e).with_span(cmd.span);
+            // Build: [ (optional) assume result == e ; ] assert Ens1 ; ... ; assert Ensk ; assume false
+            let mut seq: Option<IVLCmd> = None;
 
-                    IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: eq } }
-                }
-                None => {
-                    // void-style return; nothing to constrain
-                    IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(true) } }
-                }
+            if let Some(e) = expr {
+                // (a) relate `result` to `e` so posts that mention result talk about this value
+                let res = Expr::ident("result", &e.ty).with_span(e.span);
+                let eq  = Expr::op(&res, Op::Eq, e).with_span(cmd.span);
+                let a   = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: eq } };
+                seq = Some(a);
+            }
+
+            // (b) assert each method postcondition here (use each post’s span for sharp blame)
+            for phi in ensures {
+                let a = IVLCmd {
+                    span: phi.span,
+                    kind: IVLCmdKind::Assert {
+                        condition: phi.formula.clone(),
+                        message: phi.message.clone(),
+                    },
+                };
+                seq = Some(match seq {
+                    None => a,
+                    Some(acc) => IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(acc), Box::new(a)) },
+                });
+            }
+
+            // (c) cut the path
+            let cut = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } };
+            match seq {
+                None => cut, // void return, no posts? then just cut; (if posts exist, seq is Some and we fall below)
+                Some(acc) => IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(acc), Box::new(cut)) }
             }
         }
 
@@ -176,7 +202,7 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             // ----- 3) For each branch: { assume bi; enc(Ci); (assert each inv); assume false } ⫴ { assume !bi; skip } -----
             for (i,case) in enumerate(&body.cases) {
                 let bi      = case.condition.clone();
-                let enc_ci  = cmd_to_ivlcmd(&case.cmd);
+                let enc_ci  = cmd_to_ivlcmd_with_ensures(&case.cmd, ensures);
 
                 // then: assume bi; enc(Ci); assert I1; ...; assert Im; assume false
                 let mut then_seq = IVLCmd {
@@ -236,7 +262,7 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
         //     let i_expr = Expr::ident(name.as_str(), &Type::Int).with_span(name.span);
         //     let cond  = Expr::op(&i_expr, Op::Lt, end).with_span(cmd.span);
 
-        //     let body_ivl = cmd_to_ivlcmd(&body.cmd); // Block → &Cmd
+        //     let body_ivl = cmd_to_ivlcmd_with_ensures(&body.cmd); // Block → &Cmd
         //     let one      = Expr::num(1).with_span(cmd.span);
         //     let next_i   = Expr::op(&i_expr, Op::Add, &one).with_span(cmd.span);
         //     let incr     = IVLCmd {
@@ -287,7 +313,7 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             let found = format!("{other:#?}");
 
             todo!(
-                "cmd_to_ivlcmd: unsupported CmdKind at {span:?}\n\
+                "cmd_to_ivlcmd_with_ensures: unsupported CmdKind at {span:?}\n\
                 ├─ found: {found}\n\
                 ├─ discriminant: {discr:?}\n\
                 └─ expected one of: {SUPPORTED}\n\

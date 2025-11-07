@@ -1,19 +1,18 @@
 pub mod ivl;
 mod ivl_ext;
 
-use itertools::Itertools;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang_ui::prelude::{slang::{ast::{self, Cmd, Expr}, smt::SmtError}, *};
+use slang_ui::prelude::{slang::{ast::{Cmd, Expr}}, *};
 
 pub mod swp;
 pub mod utils;
 pub mod lowering;
-pub mod dsa;
 
 use swp::swp;
-use utils::{conj_or_true, subst_result_in_expr};
-use lowering::cmd_to_ivlcmd;
+use utils::{conj_or_true};
 use swp::Obligation;
+
+use crate::lowering::cmd_to_ivlcmd_with_ensures;
 
 
 pub struct App;
@@ -78,7 +77,7 @@ impl slang_ui::Hook for App {
             
 
             // 3) Lower slang Cmd -> IVL, preserving spans 
-            let ivl_body = cmd_to_ivlcmd(&body.cmd);
+            let ivl_body = cmd_to_ivlcmd_with_ensures(&body.cmd, &goals0);
              
             let ivl_root = IVLCmd { 
                 span: m.span, // or a method-level span if you have one 
