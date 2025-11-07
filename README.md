@@ -1,17 +1,30 @@
 # Features Implemented
 Core Feature A: single loop-free method ✅
+
 Core Feature B: partial correctness of loops ✅
+
 Core Feature C: error reporting ✅
+
 Extension Feature 1: bounded for-loops ✅
+
 Extension Feature 2: verification of mutually recursive methods ✅
+
 Extension Feature 3: efficient assignments ❌
+
 Extension Feature 4: unbounded for-loops ✅
+
 Extension Feature 5: custom type definitions ✅
+
 Extension Feature 6: user-defined functions ✅
+
 Extension Feature 7: total correctness for methods ✅
+
 Extension Feature 8: total correctness of loops ✅
+
 Extension Feature 9: global variable ❌
+
 Extension Feature 10: early return ✅
+
 Extension Feature 11: breaking loops ❌
 
 ty ❤️
