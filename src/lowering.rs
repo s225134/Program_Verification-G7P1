@@ -1,8 +1,10 @@
-use std::fmt;
+use std::{collections::HashSet, fmt, ops::Not};
 
 use crate::ivl::{IVLCmd, IVLCmdKind};
-use slang::ast::{Cmd, CmdKind, Expr, Op, Type};
+use itertools::enumerate;
+use slang::ast::{Cmd, CmdKind, Expr, Op, Type, Name};
 use slang_ui::prelude::{slang::ast::MethodRef, *};
+use crate::utils::{conj_or_true, modified_vars};
 
 /// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
 /// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
@@ -90,13 +92,23 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             },
             None => {
                 let (_ty_span, ty_val) = ty; // ty is &(Span, Type)
-                IVLCmd {
-                    span: cmd.span,
-                    kind: IVLCmdKind::Havoc {
-                        name: name.clone(),
-                        ty: ty_val.clone(),
-                    },
-                }
+                IVLCmd::seq(
+                    &IVLCmd {
+                        span: cmd.span,
+                        kind: IVLCmdKind::Havoc {
+                            name: name.clone(),
+                            ty: ty_val.clone(),
+                        },
+                    }, 
+                    &IVLCmd {
+                        span: cmd.span,
+                        kind: IVLCmdKind::Assert { condition: 
+                            Expr::ident(&name.ident, &ty.1).eq(&Expr::ident(&name.ident, &ty.1)), 
+                            message: "Dummy assertion to fix smt library".to_string() 
+                        }
+                    }
+            )
+                
             }
         },
 
@@ -124,6 +136,132 @@ pub fn cmd_to_ivlcmd(cmd: &Cmd) -> IVLCmd {
             }
         }
 
+        CmdKind::Loop { invariants, variant: _, body } => {
+            // ----- Mod := union of writes in all guarded bodies -----
+            let mut modset = HashSet::<_>::new();
+            for case in &body.cases { modset.extend(case.cmd.clone().assigned_vars().clone()); }
+
+            // ----- 1) Entry VC: one Assert per invariant (preserve spans) -----
+            // Build a left-associated Seq of per-invariant asserts.
+            let mut seq: Option<IVLCmd> = None;
+            for inv in invariants {
+                let a = IVLCmd {
+                    span: inv.span, // <— precise blame location
+                    kind: IVLCmdKind::Assert {
+                        condition: inv.clone(),
+                        message: "loop invariant might not hold on entry".to_owned(),
+                    },
+                };
+                seq = Some(match seq {
+                    None => a,
+                    Some(acc) => IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(acc), Box::new(a)) },
+                });
+            }
+            let mut seq = seq.unwrap_or(IVLCmd::assert(&Expr::bool(true), "Skip"));
+
+            // ----- 2) havoc Mod; then one Assume per invariant (keep spans) -----
+            for x in &modset {
+                let ty = &x.1;
+                let h = IVLCmd { span: cmd.span, kind: IVLCmdKind::Havoc { name: x.0.clone(), ty: ty.clone() } };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(h)) };
+            }
+            for inv in invariants {
+                let as_inv = IVLCmd {
+                    span: inv.span, // <— also attribute the assume to the invariant itself
+                    kind: IVLCmdKind::Assume { condition: inv.clone() },
+                };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(as_inv)) };
+            }
+
+            // ----- 3) For each branch: { assume bi; enc(Ci); (assert each inv); assume false } ⫴ { assume !bi; skip } -----
+            for (i,case) in enumerate(&body.cases) {
+                let bi      = case.condition.clone();
+                let enc_ci  = cmd_to_ivlcmd(&case.cmd);
+
+                // then: assume bi; enc(Ci); assert I1; ...; assert Im; assume false
+                let mut then_seq = IVLCmd {
+                    span: bi.span,
+                    kind: IVLCmdKind::Assume { condition: bi.clone() },
+                };
+                then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(enc_ci)) };
+
+                // per-invariant preservation asserts, each with its own span
+                for inv in invariants {
+                    let assert_pres = IVLCmd {
+                        span: inv.span, // <— blame the exact invariant that fails to be preserved
+                        kind: IVLCmdKind::Assert {
+                            condition: inv.clone(),
+                            message: format!("loop invariant might not be preserved for branch {}", i),
+                        },
+                    };
+                    then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(assert_pres)) };
+                }
+
+                let cut = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } };
+                then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(cut)) };
+
+                // else: assume !bi; skip   (this accumulates ¬bi for the survivor path)
+                let else_branch = IVLCmd {
+                    span: bi.span,
+                    kind: IVLCmdKind::Assume { condition: Expr::not(bi) } 
+                };
+
+                // nondet between taken and not-taken guarded paths
+                let nondet = IVLCmd { span: cmd.span, kind: IVLCmdKind::NonDet(Box::new(then_seq), Box::new(else_branch)) };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(nondet)) };
+            }
+
+            // Done. The survivor path has all `Assume inv` plus every `assume !bi`.
+            // That yields I ∧ ∧i ¬bi as the post fact for code after the loop.
+            seq
+
+        }
+
+        // THIS IS WORK IN PROGRESS (should work for bounded loops)
+        // CmdKind::For { name, range, invariants, variant: _, body } => {
+        //     // for i in start..end { B } ≡ i := start; while (i < end) invariant I { B; i := i + 1 }
+        //     let (start, end) = match range {
+        //         slang::ast::Range::FromTo(start, end) => (start, end),
+        //     };
+
+        //     // i := start
+        //     let init = IVLCmd {
+        //         span: cmd.span,
+        //         kind: IVLCmdKind::Assignment {
+        //             name: name.clone(),
+        //             expr: start.clone(),
+        //         },
+        //     };
+        //     // while (i < end) { body; i := i + 1 }
+        //     let i_expr = Expr::ident(name.as_str(), &Type::Int).with_span(name.span);
+        //     let cond  = Expr::op(&i_expr, Op::Lt, end).with_span(cmd.span);
+
+        //     let body_ivl = cmd_to_ivlcmd(&body.cmd); // Block → &Cmd
+        //     let one      = Expr::num(1).with_span(cmd.span);
+        //     let next_i   = Expr::op(&i_expr, Op::Add, &one).with_span(cmd.span);
+        //     let incr     = IVLCmd {
+        //         span: cmd.span,
+        //         kind: IVLCmdKind::Assignment { name: name.clone(), expr: next_i },
+        //     };
+        //     let while_body = IVLCmd {
+        //         span: cmd.span,
+        //         kind: IVLCmdKind::Seq(Box::new(body_ivl), Box::new(incr)),
+        //     };
+
+        //     let while_cmd = IVLCmd {
+        //         span: cmd.span,
+        //         kind: IVLCmdKind::While {
+        //             condition: cond,
+        //             invariants: invariants.clone(),
+        //             variant: None,
+        //             body: Box::new(while_body),
+        //         },
+        //     };
+        //     IVLCmd {
+        //         span: cmd.span,
+        //         kind: IVLCmdKind::Seq(Box::new(init), Box::new(while_cmd)),
+        //     }
+        // }
         CmdKind::MethodCall{ name, fun_name, args, method } => {
             let name = name.clone().expect("MethodCall without a result variable not supported yet");
             let method_name = method.get().map(|m| m.name.clone());

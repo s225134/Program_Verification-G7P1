@@ -1,8 +1,9 @@
 pub mod ivl;
 mod ivl_ext;
 
+use itertools::Itertools;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang_ui::prelude::{slang::ast::{Cmd, Expr}, *};
+use slang_ui::prelude::{slang::{ast::{self, Cmd, Expr}, smt::SmtError}, *};
 
 pub mod swp;
 pub mod utils;
@@ -13,7 +14,6 @@ use swp::swp;
 use utils::{conj_or_true, subst_result_in_expr};
 use lowering::cmd_to_ivlcmd;
 use swp::Obligation;
-use dsa::*;
 
 
 pub struct App;
@@ -36,7 +36,7 @@ impl slang_ui::Hook for App {
                     // m.return_ty: Option<(Span, Type)>
                     Some((_, ty)) => {
                         let res_id = Expr::ident("result", &ty).with_span(ens.span);
-                        subst_result_in_expr(ens, &res_id)
+                        Expr::subst_result(ens, &res_id)
                     }
                     None => ens.clone(),
                 };
@@ -59,12 +59,27 @@ impl slang_ui::Hook for App {
             }
             
             // 2) If no body, nothing to verify 
-            let Some(body) = m.body.clone() else { continue; }; 
-            let cmd = &body.cmd; 
+            let Some(mut body) = m.body.clone() else { continue; };
+
+            // Assert all of the parameters, so that they are declared in the smt solver
+            let params_assertion: Cmd =
+                m.args
+                    .iter()
+                    .map(|v| Expr::ident(&v.name.ident, &v.ty.1).eq(&Expr::ident(&v.name.ident, &v.ty.1)))
+                    .map(|e| Cmd::assert(&e, "Dummy parameter assertion to fix smt error."))
+                    .fold(Cmd::assert(&Expr::bool(true), "Dummy"), |acc, pa| acc.seq(&pa));
+
+            // ensure the borrow ends before we assign back:
+            let new_cmd = {
+                let current: &Cmd = body.cmd.as_ref();      // borrow the existing command
+                params_assertion.seq(current)              // produce an owned Cmd
+            };
+            body.cmd = Box::new(new_cmd);                   // replace it
             
+
             // 3) Lower slang Cmd -> IVL, preserving spans 
-            
-            let ivl_body = cmd_to_ivlcmd(cmd); 
+            let ivl_body = cmd_to_ivlcmd(&body.cmd);
+             
             let ivl_root = IVLCmd { 
                 span: m.span, // or a method-level span if you have one 
                 kind: IVLCmdKind::Seq( 
@@ -76,19 +91,34 @@ impl slang_ui::Hook for App {
                     }), 
                     Box::new(ivl_body), ), 
                 }; 
-            
+                
+            println!("{}", ivl_root);
             
             // 5) Notes-style SWP: (Cmd, X) -> X' 
             let obligations = swp(&ivl_root, goals0); 
             
             // 6) Check each obligation independently (they are *closed* now) 
             for obl in obligations { 
-                println!("{:?}", obl.formula);
                 // Translate to SMT outside the closure so '?' uses outer Result type 
                 let sobl = obl.formula.smt(cx.smt_st())?; 
+
+                // result declaration hack part 1
+                let mut dummy = Expr::bool(true);
+                match &m.return_ty {
+                        None => {},
+                        Some((_,ty)) => {
+                            dummy = Expr::ident("result", &ty);
+                            dummy = dummy.eq(&dummy);
+                        }
+                    }
+                let sdummy = dummy.smt(cx.smt_st())?;
                 
                 // Ask if the negation is SAT 
                 solver.scope(|solver| -> Result<(), smtlib::Error> { 
+                    
+                    // result declaration hack part 2
+                    solver.assert(sdummy.as_bool()?)?;
+
                     solver.assert(!sobl.as_bool()?)?; 
                     
                     match solver.check_sat()? { 

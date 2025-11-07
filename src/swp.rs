@@ -1,4 +1,6 @@
-use crate::slang::ast::{Expr, Type};
+use slang_ui::prelude::slang::ast::Var;
+
+use crate::slang::ast::{Expr, Type, Quantifier};
 use crate::slang::Span;
 use crate::ivl::{IVLCmd, IVLCmdKind};
 use crate::utils::{expr_safety_guards, subst_var_in_expr};
@@ -57,19 +59,21 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
             out
         },
         
-        IVLCmdKind::Havoc { name, ty: _ } => {
+        IVLCmdKind::Havoc { name, ty } => {
             let mut out = Vec::new();
             for g in goals {
                 // Create a fresh variable of the same name
-                let havoc_var = Expr::ident(&name.ident, &Type::Bool).with_span(cmd.span);
-                let g_subst = subst_var_in_expr(&g.formula, &name.ident, &havoc_var);
-                out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
+                out.push(Obligation { 
+                    formula: 
+                        Expr::quantifier(
+                        Quantifier::Forall, 
+                        &[Var {span: name.span, name: name.clone(), ty: (name.span, ty.clone())}],
+                        &g.formula), 
+                    span: g.span, 
+                    message: g.message,
+                })
             }
             out
         }
-        
-        _ => {todo!("Not yet implemented")}
-
-        // IVLCmdKind::Havoc { .. } => goals,
     }
 }
