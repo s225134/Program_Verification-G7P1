@@ -44,11 +44,12 @@ impl slang_ui::Hook for App {
             
             let x = match &fun.body{
                 Some(b) => {
-                    if (fun.ensures().count()>0){
-                        cx.error(fun.name.span, "we do not check post conditions for functions with bodies");
-                    }
-                    let eq = post_expr.eq(&b);
-                    pre.imp(&eq)}
+                    // if (fun.ensures().count()>0){
+                    //     cx.error(fun.name.span, "we do not check post conditions for functions with bodies");
+                    // }
+                    // let eq = post_expr.eq(&b);
+                    let post_sub = post.subst_result(b);
+                    pre.imp(&post_sub)}
                 _ => pre.imp(&post),
             };
 
