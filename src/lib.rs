@@ -53,53 +53,42 @@ impl slang_ui::Hook for App {
                 .reduce(|a,b| a.and(&b))
                 .unwrap_or(Expr::bool(true));
 
-            let ensures_conj = fun.ensures().cloned()
-                .reduce(|a,b| a.and(&b))
-                .unwrap_or(Expr::bool(true))
-                .subst_result(&call_expr);
+            for ensures_expr in fun.ensures() {
+                // Substitute `result` with f(args)
+                let ensures_subst = ensures_expr.clone().subst_result(&call_expr);
 
-            // let post = fun.ensures().cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
-        
+                // ∀ args. pre ⇒ ensures_i
+                let post_ax = Expr::quantifier(
+                    slang::ast::Quantifier::Forall,
+                    &fun.args,
+                    &pre.imp(&ensures_subst)
+                );
 
+                let spost_ax = post_ax.smt(cx.smt_st())?;
 
-            let post_ax = Expr::quantifier(
-                slang::ast::Quantifier::Forall,
-                &fun.args,
-                &pre.imp(&ensures_conj)
-            );
-
-            let spost_ax = post_ax.smt(cx.smt_st())?;
-
-            // PROVE it once; don't assert it globally.
-            solver.scope(|s| -> Result<(), smtlib::Error> {
-                // use the outer state so the error type matches smtlib::Error
-                let phi = spost_ax.as_bool()?;
-                s.assert(!phi.clone())?;
-                match s.check_sat()? {
-                    smtlib::SatResult::Unsat => { /* ok */ }
-                    smtlib::SatResult::Sat => {
-                        cx.error(fun.name.span, "function ensures do not follow from the definition/requirements");
+                // PROVE each ensures clause independently
+                solver.scope(|s| -> Result<(), smtlib::Error> {
+                    let phi = spost_ax.as_bool()?;
+                    s.assert(!phi.clone())?;
+                    match s.check_sat()? {
+                        smtlib::SatResult::Unsat => { /* ok */ }
+                        smtlib::SatResult::Sat => {
+                            cx.error(
+                                ensures_expr.span,
+                                "ensures clause does not follow from definition/requirements",
+                            );
+                        }
+                        smtlib::SatResult::Unknown => {
+                            cx.warning(
+                                ensures_expr.span,
+                                "ensures clause proof is unknown",
+                            );
+                        }
                     }
-                    smtlib::SatResult::Unknown => {
-                        cx.warning(fun.name.span, "function ensures proof is unknown");
-                    }
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                })?;
+            }
 
-            // let x = match &fun.body{
-            //     Some(b) => {
-            //         // if (fun.ensures().count()>0){
-            //         //     cx.error(fun.name.span, "we do not check post conditions for functions with bodies");
-            //         // }
-            //         // let eq = post_expr.eq(&b);
-            //         let post_sub = post.subst_result(b);
-            //         pre.imp(&post_sub)}
-            //     _ => pre.imp(&post),
-            // };
-
-            // let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
-            // solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
                 
         }
 
