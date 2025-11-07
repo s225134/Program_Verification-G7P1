@@ -2,9 +2,9 @@ use std::{collections::HashSet, ops::Not};
 
 use crate::{ivl::{IVLCmd, IVLCmdKind}, swp::Obligation};
 use itertools::enumerate;
-use slang::ast::{Cmd, CmdKind, Expr, Op};
+use slang::ast::{Cmd, CmdKind, Expr, Op, Range, Type};
 use slang_ui::prelude::{slang::{ast::{Specification}}, *};
-use crate::utils::{expr_safety_guards};
+use crate::utils::{expr_safety_guards, subst_var_in_expr};
 
 
 fn fresh_tmp(name: &str, _ty: &slang::ast::Type, span: slang::Span) -> slang::ast::Name {
@@ -302,54 +302,83 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
 
         }
 
-        // THIS IS WORK IN PROGRESS (should work for bounded loops)
-        // CmdKind::For { name, range, invariants, variant: _, body } => {
-        //     // for i in start..end { B } ≡ i := start; while (i < end) invariant I { B; i := i + 1 }
-        //     let (start, end) = match range {
-        //         slang::ast::Range::FromTo(start, end) => (start, end),
-        //     };
+        CmdKind::For { name, range, invariants, variant: _, body } => {
+            let (lo, hi) = match range {
+                Range::FromTo(lo, hi) => (lo.clone(), hi.clone()),
+            };
+            let i_expr    = Expr::ident(&name.ident, &Type::Int).with_span(name.span);
+            let i_plus_1  = Expr::op(&i_expr, Op::Add, &Expr::num(1).with_span(name.span)).with_span(name.span);
+            let ge = Expr::op(&lo, Op::Le, &i_expr).with_span(cmd.span);
+            let lt = Expr::op(&i_expr, Op::Lt, &hi).with_span(cmd.span);
+            let guard = Expr::op(&ge, Op::And, &lt).with_span(cmd.span);
 
-        //     // i := start
-        //     let init = IVLCmd {
-        //         span: cmd.span,
-        //         kind: IVLCmdKind::Assignment {
-        //             name: name.clone(),
-        //             expr: start.clone(),
-        //         },
-        //     };
-        //     // while (i < end) { body; i := i + 1 }
-        //     let i_expr = Expr::ident(name.as_str(), &Type::Int).with_span(name.span);
-        //     let cond  = Expr::op(&i_expr, Op::Lt, end).with_span(cmd.span);
+            // ----- 1) Entry VC: assert I with i := L -----
+            let mut seq: IVLCmd = IVLCmd::nop();
+            for inv in invariants {
+                let inv_at_L = subst_var_in_expr(inv, &name.ident, &lo);   // i -> L
+                let a = IVLCmd {
+                    span: inv.span,
+                    kind: IVLCmdKind::Assert {
+                        condition: inv_at_L,
+                        message: "loop invariant might not be preserved".to_owned(),
+                    },
+                };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(a)) };
+            }
 
-        //     let body_ivl = cmd_to_ivlcmd_with_ensures(&body.cmd); // Block → &Cmd
-        //     let one      = Expr::num(1).with_span(cmd.span);
-        //     let next_i   = Expr::op(&i_expr, Op::Add, &one).with_span(cmd.span);
-        //     let incr     = IVLCmd {
-        //         span: cmd.span,
-        //         kind: IVLCmdKind::Assignment { name: name.clone(), expr: next_i },
-        //     };
-        //     let while_body = IVLCmd {
-        //         span: cmd.span,
-        //         kind: IVLCmdKind::Seq(Box::new(body_ivl), Box::new(incr)),
-        //     };
+            // ----- 2) Havoc loop-carried state and DECLARE i, then assume I -----
+            let mut modset = body.cmd.clone().assigned_vars();
+            modset.retain(|(n, _ty)| n.ident != name.ident);        // exclude i
+            for (n, ty) in &modset {
+                let h = IVLCmd { span: cmd.span, kind: IVLCmdKind::Havoc { name: n.clone(), ty: ty.clone() } };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(h)) };
+            }
+            // declare i so using it in assumes is well-formed
+            seq = IVLCmd {
+                span: name.span,
+                kind: IVLCmdKind::Seq(
+                    Box::new(seq),
+                    Box::new(IVLCmd { span: name.span, kind: IVLCmdKind::Havoc { name: name.clone(), ty: Type::Int } }),
+                )
+            };
 
-        //     let while_cmd = IVLCmd {
-        //         span: cmd.span,
-        //         kind: IVLCmdKind::While {
-        //             condition: cond,
-        //             invariants: invariants.clone(),
-        //             variant: None,
-        //             body: Box::new(while_body),
-        //         },
-        //     };
-        //     IVLCmd {
-        //         span: cmd.span,
-        //         kind: IVLCmdKind::Seq(Box::new(init), Box::new(while_cmd)),
-        //     }
-        // }
+            for inv in invariants {
+                let as_inv = IVLCmd { span: inv.span, kind: IVLCmdKind::Assume { condition: inv.clone() } };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(as_inv)) };
+            }
+
+            // ----- 3) One-step: assume guard; C; assert I with i := i+1; assume false -----
+            let mut then_seq = IVLCmd { span: guard.span, kind: IVLCmdKind::Assume { condition: guard.clone() } };
+            let enc_body = cmd_to_ivlcmd_with_ensures(&body.cmd, ensures);
+            then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(enc_body)) };
+
+            // preservation at successor index
+            for inv in invariants {
+                // i -> i+1
+                let inv_next = subst_var_in_expr(inv, &name.ident, &i_plus_1);
+                let a = IVLCmd {
+                    span: inv.span,
+                    kind: IVLCmdKind::Assert {
+                        condition: inv_next,
+                        message: "loop invariant might not be preserved".to_owned(),
+                    },
+                };
+                then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(a)) };
+            }
+            then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } })) };
+
+            // else: assume ¬guard
+            let else_branch = IVLCmd { span: guard.span, kind: IVLCmdKind::Assume { condition: Expr::op(&guard, Op::Imp, &Expr::bool(false)).with_span(guard.span) } };
+
+            // ----- 4) Nondet branch -----
+            let nondet = IVLCmd { span: cmd.span, kind: IVLCmdKind::NonDet(Box::new(then_seq), Box::new(else_branch)) };
+            IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(nondet)) }
+        }
+
+
 
         CmdKind::MethodCall { name, fun_name, args, method } => {
-            // --- edge cases (exactly as you requested) ---
+            // --- edge cases ---
             let var_name = if let Some(n) = name.clone() {
                 n
             } else {
