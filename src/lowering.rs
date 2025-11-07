@@ -6,7 +6,7 @@ use slang::ast::{Cmd, CmdKind, Expr, Op};
 use slang_ui::prelude::*;
 
 
-fn fresh_tmp(name: &str, ty: &slang::ast::Type, span: slang::Span) -> slang::ast::Name {
+fn fresh_tmp(name: &str, _ty: &slang::ast::Type, span: slang::Span) -> slang::ast::Name {
     // Any freshening scheme; even suffixing a counter is fine for now.
     // If you don't have a global gensym, use a monotonic static or UUID.
     let ident = format!("__tmp_{}_{}", name, span.start()); 
@@ -162,7 +162,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
             }
         }
 
-        CmdKind::Loop { invariants, variant: _, body } => {
+        CmdKind::Loop { invariants, variant, body } => {
             // ----- Mod := union of writes in all guarded bodies -----
             let mut modset = HashSet::<_>::new();
             for case in &body.cases { modset.extend(case.cmd.clone().assigned_vars().clone()); }
@@ -183,6 +183,23 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                     Some(acc) => IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(acc), Box::new(a)) },
                 });
             }
+            // 1b) Entry: if variant exists, assert t >= 0
+            if let Some(t) = variant {
+                let ge0 = Expr::op(t, Op::Ge, &Expr::num(0).with_span(t.span)).with_span(t.span);
+                let a = IVLCmd {
+                    span: t.span,
+                    kind: IVLCmdKind::Assert { condition: ge0, message: "loop variant must be non-negative on entry".to_owned() }
+                };
+                seq = Some(match seq { 
+                    None => a, 
+                    Some(acc) => IVLCmd { 
+                        span: cmd.span, 
+                        kind: IVLCmdKind::Seq(Box::new(acc), Box::new(a)) 
+                    }
+                }
+            );
+            }
+
             let mut seq = seq.unwrap_or(IVLCmd::assert(&Expr::bool(true), "Skip"));
 
             // ----- 2) havoc Mod; then one Assume per invariant (keep spans) -----
@@ -191,6 +208,8 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 let h = IVLCmd { span: cmd.span, kind: IVLCmdKind::Havoc { name: x.0.clone(), ty: ty.clone() } };
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(h)) };
             }
+
+            // ----- 2b) assume each invariant
             for inv in invariants {
                 let as_inv = IVLCmd {
                     span: inv.span, // <— also attribute the assume to the invariant itself
@@ -199,16 +218,41 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(as_inv)) };
             }
 
-            // ----- 3) For each branch: { assume bi; enc(Ci); (assert each inv); assume false } ⫴ { assume !bi; skip } -----
+            // 2c) After havocs, if variant exists, assume t >= 0 again 
+            if let Some(t) = variant {
+                let ge0 = Expr::op(t, Op::Ge, &Expr::num(0).with_span(t.span)).with_span(t.span);
+                let asv = IVLCmd { span: t.span, kind: IVLCmdKind::Assume { condition: ge0 } };
+                seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(seq), Box::new(asv)) };
+            }
+
+            // ----- 3) For each branch: { assume bi; v := V(m); enc(Ci); (assert each inv); assert v < V(m);assume false } ⫴ { assume !bi; skip } -----
             for (i,case) in enumerate(&body.cases) {
-                let bi      = case.condition.clone();
-                let enc_ci  = cmd_to_ivlcmd_with_ensures(&case.cmd, ensures);
+
+                let bi = case.condition.clone(); // bi
 
                 // then: assume bi; enc(Ci); assert I1; ...; assert Im; assume false
-                let mut then_seq = IVLCmd {
-                    span: bi.span,
-                    kind: IVLCmdKind::Assume { condition: bi.clone() },
+                let mut then_seq = IVLCmd { 
+                    span: bi.span, 
+                    kind: IVLCmdKind::Assume { condition: bi.clone() }  // assume bi
                 };
+
+                // if variant exists, havoc tmp; assume tmp == variant;
+                if let Some(t) = variant { 
+                    // Make a fresh temp __var_old : Int and tie it to current t via Assume (__var_old == t)
+                    let tmp = fresh_tmp("variant_old", &t.ty, t.span); // or t.ty if you track it
+                    // Declare tmp by Havoc (so the solver knows it); then constrain it.
+                    let decl = IVLCmd { span: t.span, kind: IVLCmdKind::Havoc { name: tmp.clone(), ty: slang::ast::Type::Int } };
+                    //// let dummy_variant = IVLCmd::assert(&Expr::ident(&tmp.ident, &t.ty), "Dummy assertion variant");
+                    let eq   = Expr::op(&Expr::ident(&tmp.ident, &slang::ast::Type::Int).with_span(t.span), Op::Eq, t).with_span(t.span);
+                    let tie  = IVLCmd { span: t.span, kind: IVLCmdKind::Assume { condition: eq } };
+
+                    then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(decl)) }; // havoc tmp
+                    // then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(dummy_variant)) };
+                    then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(tie)) }; // assume tmp = variant
+                }
+
+                // Body
+                let enc_ci  = cmd_to_ivlcmd_with_ensures(&case.cmd, ensures);
                 then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(enc_ci)) };
 
                 // per-invariant preservation asserts, each with its own span
@@ -221,6 +265,21 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                         },
                     };
                     then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(assert_pres)) };
+                }
+
+                // NEW: assert strict decrease t < t_old on taken iteration
+                if let Some(t) = variant {
+                    let tmp = fresh_tmp("variant_old", &t.ty, t.span);
+                    let t_old = Expr::ident(&tmp.ident, &t.ty).with_span(t.span);
+                    let dec   = Expr::op(t, Op::Lt, &t_old).with_span(t.span);
+                    let assert_dec = IVLCmd {
+                        span: t.span,
+                        kind: IVLCmdKind::Assert {
+                            condition: dec,
+                            message: format!("loop variant must strictly decrease for branch {}", i),
+                        },
+                    };
+                    then_seq = IVLCmd { span: cmd.span, kind: IVLCmdKind::Seq(Box::new(then_seq), Box::new(assert_dec)) };
                 }
 
                 let cut = IVLCmd { span: cmd.span, kind: IVLCmdKind::Assume { condition: Expr::bool(false) } };
