@@ -19,7 +19,6 @@ use crate::lowering::cmd_to_ivlcmd_with_ensures;
 
 pub struct App;
 
-// Your main verifier logic stays here
 impl slang_ui::Hook for App { 
     fn analyze(&self, cx: &slang_ui::Context, file: &slang::SourceFile) -> Result<()> { 
         let mut solver = cx.solver()?; 
@@ -32,7 +31,7 @@ impl slang_ui::Hook for App {
                 .collect::<Result<Vec<_>, _>>()?;
             solver.declare_fun(&smtlib::funs::Fun::new(solver.st(), &fun.name.ident, vars_, return_ty))?;
 
-            // (b) convenience: build f(args) as an Expr
+            // convenience: build f(args) as an Expr
             let call_expr = {
                 let args_exprs: Vec<Expr> = fun.args.iter()
                     .map(|a| Expr::ident(&a.name.ident, &a.ty.1))
@@ -41,9 +40,9 @@ impl slang_ui::Hook for App {
                 Expr::call(fun.name.clone(), args_exprs, fref)
             };
 
-            // (c) if the function has a body, assert the *definition* forall args. f(args) = body
+            //  if the function has a body, assert the *definition* forall args. f(args) = body
             if let Some(body) = &fun.body {
-                // IMPORTANT: no 'requires' guard here; we want definitional equality everywhere
+                // no 'requires' guard here; we want definitional equality everywhere
                 let def_eq = call_expr.clone().eq(body);
                 let def_ax = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &def_eq);
                 solver.assert(def_ax.smt(solver.st())?.as_bool()?)?;
@@ -57,7 +56,7 @@ impl slang_ui::Hook for App {
                 // Substitute `result` with f(args)
                 let ensures_subst = ensures_expr.clone().subst_result(&call_expr);
 
-                // ∀ args. pre ⇒ ensures_i
+                // for all args. pre => ensures_i
                 let post_ax = Expr::quantifier(
                     slang::ast::Quantifier::Forall,
                     &fun.args,
@@ -66,7 +65,7 @@ impl slang_ui::Hook for App {
 
                 let spost_ax = post_ax.smt(cx.smt_st())?;
 
-                // PROVE each ensures clause independently
+                // prove each ensures clause independently
                 solver.scope(|s| -> Result<(), smtlib::Error> {
                     let phi = spost_ax.as_bool()?;
                     s.assert(!phi.clone())?;
@@ -99,22 +98,30 @@ impl slang_ui::Hook for App {
                     _ => panic!("Function return type must be a sort"),
                 };
                 let vars_ = fun.args.iter().map(|v| v.ty.1.smt(solver.st())).collect::<Result<Vec<_>, _>>()?;
+                // Declare the function in the SMT solver: f(args...) -> return_ty
                 solver.declare_fun(&smtlib::funs::Fun::new(solver.st(), &fun.name.ident, vars_, return_ty))?;
-
+                
+                //get pre and post conditions
                 let pre = fun.requires();
                 let post = fun.ensures();
 
+                //combined the pre and post conditinos, along with substituting 'result' in ensures clauses with f(args...)
                 let pre = pre.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true));
                 let post_expr = Expr::call(fun.name.clone(),fun.args.iter().map(|a| Expr::ident(&a.name.ident, &a.ty.1)).collect::<Vec<_>>(),file.get_function_ref(fun.name.ident.clone()));
                 let post = post.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
 
+                //implication
                 let x = pre.imp(&post);
+                //building quantifier form implication
                 let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
+                //assert the quanitfier
                 solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
                 
 
             }
+            //process all axioms in domain
             for ax in domain.axioms() {
+                // Convert axiom expression to SMT and assert it in the solver
                 let expr_smt = ax.expr.smt(solver.st())?.as_bool()?; 
                 solver.assert(expr_smt)?;
             }   
