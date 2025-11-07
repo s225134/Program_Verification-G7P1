@@ -349,7 +349,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
         // }
 
         CmdKind::MethodCall { name, fun_name, args, method } => {
-            // --- edge cases (exactly as you requested) ---
+            // --- edge cases ---
             let var_name = if let Some(n) = name.clone() {
                 n
             } else {
@@ -375,7 +375,6 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                         .with_span(&cmd.span);
             }
 
-            // --- evaluate actuals once: tmp{i} := arg{i} ---
             let mut ivl = IVLCmd::nop();
             let mut tmps: Vec<Expr> = Vec::with_capacity(args.len());
             for (i, ei) in args.iter().enumerate() {
@@ -384,7 +383,7 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                     IVLCmd::seq(&IVLCmd::assert(ex, msg).with_span(sp), &IVLCmd::assume(ex).with_span(sp))
                 }).collect();
                 ivl = ivl.seq(&IVLCmd::seqs(&guards_assertions)); // check conditions
-                
+
                 let tmp_name = met.args[i].name.prefix(&format!("tmp{i}"));
                 let tmp_ty   = met.args[i].ty.1.clone();
                 let tmp_expr = Expr::ident(&tmp_name.ident, &tmp_ty);
@@ -392,7 +391,6 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 tmps.push(tmp_expr);
             }
 
-            // tiny inline substitution: substitute each formal with its tmp
             let subst_formals = |e: &Expr| {
                 let mut r = e.clone();
                 for (i, v) in met.args.iter().enumerate() {
@@ -401,12 +399,40 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
                 r
             };
 
-            // --- assert every requires separately (preserve span + message) ---
+            // --- assert requires ---
             for spec in &met.specifications {
                 if let Specification::Requires { span: _, expr } = spec {
                     let e_sub = subst_formals(expr);
                     let msg = format!("Precondition {} might not hold", expr); // or use attached message if your enum has one
                     ivl = ivl.seq(&IVLCmd::assert(&e_sub, &msg).with_span(&cmd.span));
+                }
+            }
+
+            // --- total correctness for direct recursion (EF7): variant checks ---
+            if fun_name.ident == met.name.ident {
+                if let Some(v) = &met.variant {
+                    // v_here: variant at the current frame (uses formals as-is)
+                    let v_here = v.clone();
+
+                    // v_call: variant at callee entry with actuals (use evaluated tmps)
+                    let v_call = {
+                        let mut r = v.clone();
+                        for (i, formal) in met.args.iter().enumerate() {
+                            r = r.subst_ident(&formal.name.ident, &tmps[i]);
+                        }
+                        r
+                    };
+
+                    // Well-foundedness on Int: both must be non-negative
+                    let ge0_here = Expr::op(&v_here, Op::Ge, &Expr::num(0).with_span(v.span)).with_span(v.span);
+                    ivl = ivl.seq(&IVLCmd::assert(&ge0_here, "variant must be non-negative in current frame").with_span(&cmd.span));
+
+                    let ge0_call = Expr::op(&v_call, Op::Ge, &Expr::num(0).with_span(v.span)).with_span(v.span);
+                    ivl = ivl.seq(&IVLCmd::assert(&ge0_call, "variant must be non-negative for recursive call").with_span(&cmd.span));
+
+                    // Strict decrease across the recursive call
+                    let dec = Expr::op(&v_here, Op::Gt, &v_call).with_span(v.span);
+                    ivl = ivl.seq(&IVLCmd::assert(&dec, "variant must strictly decrease for recursive call").with_span(&cmd.span));
                 }
             }
 
@@ -427,7 +453,9 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
             }
 
             return ivl;
-        }
+        }   
+
+
 
         other => {
             // Keep this list in sync with the arms you *do* handle
