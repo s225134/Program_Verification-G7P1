@@ -1,9 +1,10 @@
-use std::{collections::HashSet, { ops::Not}};
+use std::{collections::HashSet, ops::Not};
 
 use crate::{ivl::{IVLCmd, IVLCmdKind}, swp::Obligation};
 use itertools::enumerate;
 use slang::ast::{Cmd, CmdKind, Expr, Op};
-use slang_ui::prelude::*;
+use slang_ui::prelude::{slang::{ast::{Specification}}, *};
+use crate::utils::{expr_safety_guards};
 
 
 fn fresh_tmp(name: &str, _ty: &slang::ast::Type, span: slang::Span) -> slang::ast::Name {
@@ -346,18 +347,86 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
         //         kind: IVLCmdKind::Seq(Box::new(init), Box::new(while_cmd)),
         //     }
         // }
-        CmdKind::MethodCall{ name, fun_name, args, method } => {
-            let name = name.clone().expect("MethodCall without a result variable not supported yet");
-            let method_name = method.get().map(|m| m.name.clone());
-            IVLCmd {
-                span: cmd.span,
-                kind: IVLCmdKind::MethodCall { 
-                    name,
-                    fun_name: fun_name.clone(),
-                    args: args.clone(),
-                    method: method_name,
+
+        CmdKind::MethodCall { name, fun_name, args, method } => {
+            // --- edge cases (exactly as you requested) ---
+            let var_name = if let Some(n) = name.clone() {
+                n
+            } else {
+                return IVLCmd::assert(&Expr::bool(false),
+                                    "Method calls without assignments are not supported yet.")
+                        .with_span(&cmd.span);
+            };
+
+            let met = if let Some(m) = method.get() {
+                m
+            } else {
+                return IVLCmd::assert(&Expr::bool(false),
+                                    &format!("Method {} does not exist", fun_name.ident))
+                        .with_span(&cmd.span);
+            };
+
+            if args.len() != met.args.len() {
+                return IVLCmd::assert(&Expr::bool(false), "Wrong arity").with_span(&cmd.span);
+            }
+            if met.return_ty.is_none() {
+                return IVLCmd::assert(&Expr::bool(false),
+                                    "Method has no return but call assigns to a variable")
+                        .with_span(&cmd.span);
+            }
+
+            // --- evaluate actuals once: tmp{i} := arg{i} ---
+            let mut ivl = IVLCmd::nop();
+            let mut tmps: Vec<Expr> = Vec::with_capacity(args.len());
+            for (i, ei) in args.iter().enumerate() {
+                let guards = expr_safety_guards(ei);
+                let guards_assertions: Vec<_> = guards.iter().map(|(ex,sp,msg)| {
+                    IVLCmd::seq(&IVLCmd::assert(ex, msg).with_span(sp), &IVLCmd::assume(ex).with_span(sp))
+                }).collect();
+                ivl = ivl.seq(&IVLCmd::seqs(&guards_assertions)); // check conditions
+                
+                let tmp_name = met.args[i].name.prefix(&format!("tmp{i}"));
+                let tmp_ty   = met.args[i].ty.1.clone();
+                let tmp_expr = Expr::ident(&tmp_name.ident, &tmp_ty);
+                ivl = ivl.seq(&IVLCmd::assign(&tmp_name, ei));
+                tmps.push(tmp_expr);
+            }
+
+            // tiny inline substitution: substitute each formal with its tmp
+            let subst_formals = |e: &Expr| {
+                let mut r = e.clone();
+                for (i, v) in met.args.iter().enumerate() {
+                    r = r.subst_ident(&v.name.ident, &tmps[i]);
+                }
+                r
+            };
+
+            // --- assert every requires separately (preserve span + message) ---
+            for spec in &met.specifications {
+                if let Specification::Requires { span: _, expr } = spec {
+                    let e_sub = subst_formals(expr);
+                    let msg = format!("Precondition {} might not hold", expr); // or use attached message if your enum has one
+                    ivl = ivl.seq(&IVLCmd::assert(&e_sub, &msg).with_span(&cmd.span));
                 }
             }
+
+            // --- havoc the LHS (frame for caller) ---
+            ivl = ivl.seq(&IVLCmd::havoc(&var_name, &met.return_ty.clone().unwrap().1));
+
+            // --- assume every ensures separately (preserve span + message) ---
+            // first, result -> lhs
+            let rty = &met.return_ty.as_ref().unwrap().1;
+            let lhs_expr = Expr::ident(&var_name.ident, rty);
+
+            for spec in &met.specifications {
+                if let Specification::Ensures { span: _, expr } = spec {
+                    let e1 = subst_formals(expr);
+                    let e2 = Expr::subst_result(&e1, &lhs_expr);
+                    ivl = ivl.seq(&IVLCmd::assume(&e2).with_span(&expr.span));
+                }
+            }
+
+            return ivl;
         }
 
         other => {

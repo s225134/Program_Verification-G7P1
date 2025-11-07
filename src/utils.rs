@@ -1,3 +1,5 @@
+use slang_ui::prelude::slang::ast::{Name, Type};
+
 use crate::slang::ast::{Expr, ExprKind, Op};
 use crate::slang::{Span};
 
@@ -54,6 +56,16 @@ fn collect_guards(e: &Expr, out: &mut Vec<(Expr, Span, String)>) {
 
         _ => {}
     }
+}
+
+/// Make a fresh tmp name based on a formal name (alpha-renaming friendly).
+pub fn fresh_tmp_like(formal: &Name, i: usize) -> Name {
+    formal.prefix(&format!("tmp{}", i))
+}
+
+/// Produce an Expr::ident for a Name + Ty.
+pub fn expr_ident_from_name_ty(n: &Name, ty: &Type) -> Expr {
+    Expr::ident(&n.ident, ty)
 }
 
 // subst: replace free occurrences of variable named `x` with `v`
