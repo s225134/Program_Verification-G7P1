@@ -1,8 +1,9 @@
 pub mod ivl;
 mod ivl_ext;
 
+use itertools::Itertools;
 use ivl::{IVLCmd, IVLCmdKind};
-use slang_ui::prelude::{slang::ast::{Cmd, Expr}, *};
+use slang_ui::prelude::{miette::SourceOffset, slang::ast::{Cmd, Expr, FunctionRef}, smtlib::{Bool, and}, *};
 
 pub mod swp;
 pub mod utils;
@@ -15,6 +16,8 @@ use lowering::cmd_to_ivlcmd;
 use swp::Obligation;
 use dsa::*;
 
+use std::{collections::HashMap, env::vars};
+use slang::ast::Type;
 
 pub struct App;
 
@@ -23,6 +26,66 @@ impl slang_ui::Hook for App {
     fn analyze(&self, cx: &slang_ui::Context, file: &slang::SourceFile) -> Result<()> { 
         let mut solver = cx.solver()?; 
         
+        for fun in file.functions(){
+            let return_ty = match fun.return_ty.clone().1.smt(solver.st()) {
+                    Ok(ty) => ty,
+                    _ => panic!("Function return type must be a sort"),
+                };
+                let vars_ = fun.args.iter().map(|v| v.ty.1.smt(solver.st())).collect::<Result<Vec<_>, _>>()?;
+                solver.declare_fun(&smtlib::funs::Fun::new(solver.st(), &fun.name.ident, vars_, return_ty))?;
+
+                let pre = fun.requires();
+                let post = fun.ensures();
+
+                let pre = pre.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true));
+                let post_expr = Expr::call(fun.name.clone(),fun.args.iter().map(|a| Expr::ident(&a.name.ident, &a.ty.1)).collect::<Vec<_>>(),file.get_function_ref(fun.name.ident.clone()));
+                let post = post.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
+            
+                
+                let x = match &fun.body{
+                    Some(b) => {
+                        if (fun.ensures().count()>0){
+                            cx.error(fun.name.span, "we do not check post conditions for functions with bodies");
+                        }
+                        let eq = post_expr.eq(&b);
+                        pre.imp(&eq)}
+                    _ => pre.imp(&post),
+                };
+
+                let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
+                solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
+                
+        }
+
+        for domain in file.domains() {
+            for fun in domain.functions() {
+                let return_ty = match fun.return_ty.clone().1.smt(solver.st()) {
+                    Ok(ty) => ty,
+                    _ => panic!("Function return type must be a sort"),
+                };
+                let vars_ = fun.args.iter().map(|v| v.ty.1.smt(solver.st())).collect::<Result<Vec<_>, _>>()?;
+                solver.declare_fun(&smtlib::funs::Fun::new(solver.st(), &fun.name.ident, vars_, return_ty))?;
+
+                let pre = fun.requires();
+                let post = fun.ensures();
+
+                let pre = pre.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true));
+                let post_expr = Expr::call(fun.name.clone(),fun.args.iter().map(|a| Expr::ident(&a.name.ident, &a.ty.1)).collect::<Vec<_>>(),file.get_function_ref(fun.name.ident.clone()));
+                let post = post.cloned().reduce(|a,b| a.and(&b)).unwrap_or(Expr::bool(true)).subst_result(&post_expr);
+
+                let x = pre.imp(&post);
+                let quantifier = Expr::quantifier(slang::ast::Quantifier::Forall, &fun.args, &x);
+                solver.assert(quantifier.smt(solver.st())?.as_bool()?)?;
+                
+
+            }
+            for ax in domain.axioms() {
+                let expr_smt = ax.expr.smt(solver.st())?.as_bool()?; 
+                solver.assert(expr_smt)?;
+            }   
+            
+        }   
+
         for m in file.methods() { 
             // 1) Merge method requires and ensures into two single Expr 
             let requires = conj_or_true(m.requires().cloned()); 
