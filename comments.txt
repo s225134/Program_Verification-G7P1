@@ -1,0 +1,7 @@
+Yes—the notes line up with the plan we just switched to:
+
+At method entry, introduce a fresh variable v that remembers the variant’s initial value and assert it’s non-negative. (Notes: “use a fresh variable v to remember the variant’s initial value” and require V ≥ 0 at entry. They even show the factorial example with var v := V(x); assert v >= 0.)
+
+At each self-recursive call, check the call’s arguments make the variant strictly smaller (and non-negative): assert V(actuals) ≥ 0 and V(actuals) < v before the call. The notes phrase it as “refer to v whenever we apply the call rule” and add a condition v > V for the call; the worked factorial outline shows assert v > V(x-1) before calling factorial(x-1).
+
+No end-of-method decrease check. The notes do not require “V(now) < v at the end of the method.” That would falsely reject examples like your sumn, where the parameter doesn’t change at return. The decrease obligation is attached to calls, not the method’s final state.
