@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ops::Not};
+use std::{collections::HashSet, { ops::Not}};
 
 use crate::{ivl::{IVLCmd, IVLCmdKind}, swp::Obligation};
 use itertools::enumerate;
@@ -12,7 +12,6 @@ fn fresh_tmp(name: &str, _ty: &slang::ast::Type, span: slang::Span) -> slang::as
     let ident = format!("__tmp_{}_{}", name, span.start()); 
     slang::ast::Name { span, ident }
 }
-
 
 /// Translate a `slang::ast::Cmd` into `IVLCmd`, preserving source spans.
 /// For now we handle: Assert, Assume, Seq, Match (as nondet), VarDefinition (-> Assign/Havoc).
@@ -384,5 +383,3 @@ pub fn cmd_to_ivlcmd_with_ensures(cmd: &Cmd, ensures: &Vec<Obligation>) -> IVLCm
         }
     }
 }
-
-// missing break, continue, for, loop, return, methodcall

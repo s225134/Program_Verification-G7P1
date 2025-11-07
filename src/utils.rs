@@ -55,3 +55,13 @@ fn collect_guards(e: &Expr, out: &mut Vec<(Expr, Span, String)>) {
         _ => {}
     }
 }
+
+// subst: replace free occurrences of variable named `x` with `v`
+pub fn subst_var_in_expr(e: &Expr, x: &String, v: &Expr) -> Expr {
+    return e.subst_ident(&x, v);
+}
+
+pub fn subst_result_in_expr(e: &Expr, v: &Expr) -> Expr {
+    return e.subst_result(v);
+    
+}

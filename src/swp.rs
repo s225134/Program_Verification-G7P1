@@ -1,7 +1,7 @@
 use slang_ui::prelude::slang::ast::Var;
 
-use crate::slang::ast::{Expr, Type, Quantifier};
-use crate::slang::Span;
+use slang_ui::prelude::slang::ast::{Expr, Quantifier};
+use slang_ui::prelude::slang::Span;
 use crate::ivl::{IVLCmd, IVLCmdKind};
 use crate::utils::{expr_safety_guards};
 
@@ -49,15 +49,15 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
             out
         },
 
-        IVLCmdKind::MethodCall { name, fun_name: _, args: _, method: _ } => {
-            let mut out = Vec::new();
-            for g in goals {
-                let ret_var = Expr::ident(&name.ident, &Type::Bool).with_span(cmd.span);
-                let g_subst = Expr::subst_ident(&g.formula, &name.ident, &ret_var);
-                out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
-            }
-            out
-        },
+        // IVLCmdKind::MethodCall { name, fun_name: _, args: _, method: _ } => {
+        //     let mut out = Vec::new();
+        //     for g in goals {
+        //         let ret_var = Expr::ident(&name.ident, &Type::Bool).with_span(cmd.span);
+        //         let g_subst = Expr::subst_ident(&g.formula, &name.ident, &ret_var);
+        //         out.push(Obligation { formula: g_subst, span: g.span, message: g.message });
+        //     }
+        //     out
+        // },
         
         IVLCmdKind::Havoc { name, ty } => {
             let mut out = Vec::new();
@@ -75,5 +75,7 @@ pub fn swp(cmd: &IVLCmd, goals: Vec<Obligation>) -> Vec<Obligation> {
             }
             out
         }
+
+        _ => todo!("AHAHHAHAHA")
     }
 }
